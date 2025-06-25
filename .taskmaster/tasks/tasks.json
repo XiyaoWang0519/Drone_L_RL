@@ -17,7 +17,7 @@
             "description": "Initialize Git repository with main/develop/feature branching strategy, set up branch protection rules, and configure merge policies for collaborative development",
             "dependencies": [],
             "details": "Create repository structure with protected main branch, develop branch for integration, feature branch naming conventions, and set up PR templates and merge requirements",
-            "status": "in-progress",
+            "status": "done",
             "testStrategy": ""
           },
           {
@@ -28,7 +28,7 @@
               1
             ],
             "details": "Establish organized folder hierarchy: /firmware (STM32/ESP32 code), /ros2_ws (ROS2 workspace), /simulation (Gazebo/AirSim), /hardware (schematics/PCB), /docs (technical documentation)",
-            "status": "pending",
+            "status": "in-progress",
             "testStrategy": ""
           },
           {
@@ -802,7 +802,7 @@
     ],
     "metadata": {
       "created": "2025-06-25T19:55:24.126Z",
-      "updated": "2025-06-25T21:05:00.411Z",
+      "updated": "2025-06-25T21:10:58.982Z",
       "description": "Tasks for master context"
     }
   }
