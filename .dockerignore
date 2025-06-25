@@ -1,0 +1,63 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+docs/_build
+*.md
+
+# Build artifacts
+ros2_ws/build
+ros2_ws/install
+ros2_ws/log
+firmware/build
+
+# IDE files
+.vscode
+.cursor
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env
+pip-log.txt
+pip-delete-this-directory.txt
+.tox
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git
+.mypy_cache
+.pytest_cache
+.hypothesis
+
+# Node.js
+node_modules
+npm-debug.log*
+
+# Task Master
+.taskmaster/state.json
+
+# Test results
+tests/results
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+.tmp
+.temp

@@ -39,7 +39,7 @@
               2
             ],
             "details": "Set up workflows for cross-compilation, unit testing, integration testing, static code analysis, and automated hardware-in-the-loop testing where applicable",
-            "status": "in-progress",
+            "status": "done",
             "testStrategy": ""
           },
           {
@@ -50,7 +50,7 @@
               2
             ],
             "details": "Document emergency shutdown procedures, RF transmission safety, flight area restrictions, battery handling protocols, failsafe mechanisms, and regulatory compliance (FCC/CE)",
-            "status": "pending",
+            "status": "done",
             "testStrategy": ""
           },
           {
@@ -62,7 +62,7 @@
               3
             ],
             "details": "Create Dockerfiles for ROS2 Humble, Gazebo simulation, ARM cross-compilation toolchain, and development tools. Include docker-compose for multi-container orchestration",
-            "status": "pending",
+            "status": "in-progress",
             "testStrategy": ""
           }
         ]
@@ -802,7 +802,7 @@
     ],
     "metadata": {
       "created": "2025-06-25T19:55:24.126Z",
-      "updated": "2025-06-25T21:14:39.178Z",
+      "updated": "2025-06-25T21:25:11.233Z",
       "description": "Tasks for master context"
     }
   }
