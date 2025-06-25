@@ -28,7 +28,7 @@
               1
             ],
             "details": "Establish organized folder hierarchy: /firmware (STM32/ESP32 code), /ros2_ws (ROS2 workspace), /simulation (Gazebo/AirSim), /hardware (schematics/PCB), /docs (technical documentation)",
-            "status": "in-progress",
+            "status": "done",
             "testStrategy": ""
           },
           {
@@ -39,7 +39,7 @@
               2
             ],
             "details": "Set up workflows for cross-compilation, unit testing, integration testing, static code analysis, and automated hardware-in-the-loop testing where applicable",
-            "status": "pending",
+            "status": "in-progress",
             "testStrategy": ""
           },
           {
@@ -802,7 +802,7 @@
     ],
     "metadata": {
       "created": "2025-06-25T19:55:24.126Z",
-      "updated": "2025-06-25T21:10:58.982Z",
+      "updated": "2025-06-25T21:14:39.178Z",
       "description": "Tasks for master context"
     }
   }

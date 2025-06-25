@@ -1,0 +1,170 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  ROS_DISTRO: humble
+
+jobs:
+  lint-and-format:
+    name: Code Quality
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install linting tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install black flake8 mypy
+          pip install pre-commit
+      
+      - name: Run pre-commit hooks
+        run: |
+          pre-commit install
+          pre-commit run --all-files
+
+  ros2-build-test:
+    name: ROS2 Build and Test
+    runs-on: ubuntu-22.04
+    needs: lint-and-format
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup ROS2 Humble
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: humble
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-colcon-common-extensions
+          sudo apt-get install -y python3-rosdep
+          sudo rosdep init || true
+          rosdep update
+      
+      - name: Build ROS2 workspace
+        run: |
+          cd ros2_ws
+          rosdep install --from-paths src --ignore-src -r -y || true
+          colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
+          
+      - name: Run ROS2 tests
+        run: |
+          cd ros2_ws
+          source install/setup.bash
+          colcon test
+          colcon test-result --verbose
+
+  firmware-build:
+    name: Firmware Build
+    runs-on: ubuntu-22.04
+    needs: lint-and-format
+    strategy:
+      matrix:
+        board: [stm32, esp32]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Arduino CLI (ESP32)
+        if: matrix.board == 'esp32'
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          echo "$HOME/bin" >> $GITHUB_PATH
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+      
+      - name: Setup ARM Toolchain (STM32)
+        if: matrix.board == 'stm32'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi
+      
+      - name: Build firmware
+        run: |
+          cd firmware
+          # Placeholder build commands - will be updated when actual firmware is implemented
+          echo "Building ${{ matrix.board }} firmware..."
+          mkdir -p build/${{ matrix.board }}
+          touch build/${{ matrix.board }}/firmware.bin
+
+  simulation-test:
+    name: Simulation Testing
+    runs-on: ubuntu-22.04
+    needs: [ros2-build-test]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup ROS2 and Gazebo
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: humble
+      
+      - name: Install Gazebo Classic
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gazebo libgazebo-dev
+          sudo apt-get install -y ros-humble-gazebo-ros-pkgs
+      
+      - name: Run simulation tests
+        run: |
+          cd ros2_ws
+          source /opt/ros/humble/setup.bash
+          # Placeholder for simulation tests
+          echo "Running simulation tests..."
+          # gazebo --verbose worlds/empty.world &
+          # sleep 10
+          # pkill gazebo
+
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  documentation:
+    name: Documentation Build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python for docs
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install documentation tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install sphinx sphinx-rtd-theme
+          pip install doxygen
+      
+      - name: Build documentation
+        run: |
+          # Placeholder for documentation build
+          echo "Building project documentation..."
+          mkdir -p docs/_build
+          touch docs/_build/index.html

@@ -1,0 +1,131 @@
+name: Hardware-in-the-Loop Testing
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_suite:
+        description: 'Test suite to run'
+        required: true
+        default: 'basic'
+        type: choice
+        options:
+        - basic
+        - communication
+        - localization
+        - flight
+        - full
+      hardware_setup:
+        description: 'Hardware setup identifier'
+        required: true
+        default: 'lab-setup-1'
+        type: string
+
+env:
+  ROS_DISTRO: humble
+
+jobs:
+  hardware-validation:
+    name: Hardware Validation Tests
+    runs-on: self-hosted
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup test environment
+        run: |
+          echo "Setting up hardware test environment..."
+          echo "Test Suite: ${{ github.event.inputs.test_suite }}"
+          echo "Hardware Setup: ${{ github.event.inputs.hardware_setup }}"
+      
+      - name: Pre-flight safety checks
+        run: |
+          echo "Performing pre-flight safety checks..."
+          # Check battery levels
+          # Verify emergency stop functionality
+          # Validate communication links
+          # Confirm safe test area
+      
+      - name: Hardware connectivity test
+        run: |
+          echo "Testing hardware connectivity..."
+          # Test UWB module communication
+          # Verify flight controller connection
+          # Check sensor data streams
+      
+      - name: Basic functionality test
+        if: github.event.inputs.test_suite == 'basic' || github.event.inputs.test_suite == 'full'
+        run: |
+          echo "Running basic functionality tests..."
+          # Motor response tests
+          # Sensor calibration verification
+          # Communication protocol tests
+      
+      - name: Localization system test
+        if: github.event.inputs.test_suite == 'localization' || github.event.inputs.test_suite == 'full'
+        run: |
+          echo "Testing UWB localization system..."
+          # UWB ranging tests
+          # Position accuracy validation
+          # Multi-anchor triangulation
+      
+      - name: Communication range test
+        if: github.event.inputs.test_suite == 'communication' || github.event.inputs.test_suite == 'full'
+        run: |
+          echo "Testing communication range and reliability..."
+          # Wi-Fi range testing
+          # Command latency measurement
+          # Data throughput validation
+      
+      - name: Controlled flight test
+        if: github.event.inputs.test_suite == 'flight' || github.event.inputs.test_suite == 'full'
+        run: |
+          echo "Running controlled flight tests..."
+          # Takeoff and landing procedures
+          # Hover stability tests
+          # Emergency landing validation
+          # Obstacle avoidance verification
+      
+      - name: Post-test safety checks
+        if: always()
+        run: |
+          echo "Performing post-test safety checks..."
+          # Ensure motors are disarmed
+          # Check for hardware damage
+          # Validate all systems are safe
+          # Generate test report
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: hardware-test-results-${{ github.run_id }}
+          path: |
+            tests/hardware/results/
+            tests/hardware/logs/
+
+  safety-validation:
+    name: Safety System Validation
+    runs-on: self-hosted
+    needs: hardware-validation
+    if: always() && github.event.inputs.test_suite == 'full'
+    steps:
+      - name: Emergency shutdown test
+        run: |
+          echo "Testing emergency shutdown procedures..."
+          # Simulate various failure modes
+          # Validate emergency landing
+          # Test manual override systems
+      
+      - name: Failsafe mechanism test
+        run: |
+          echo "Testing failsafe mechanisms..."
+          # Communication loss simulation
+          # Low battery failsafe
+          # Sensor failure handling
+      
+      - name: RF compliance validation
+        run: |
+          echo "Validating RF compliance..."
+          # Power output measurements
+          # Frequency stability checks
+          # Interference testing
