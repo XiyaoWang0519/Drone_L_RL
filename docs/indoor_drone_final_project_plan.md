@@ -1,6 +1,6 @@
 ## 1. Executive Summary
 
-Build a **TDoA‑based indoor UWB localisation system** (≤ 10 cm RMS, ≥ 50 Hz) and layer a **simulation‑to‑real RL obstacle‑avoidance policy** on a sub‑250 g quad‑rotor. The project spans **two academic terms (May 2025 – Apr 2026)** and culminates in a live Design‑Fair demo.  Team of three ECE under‑graduates:
+Build a **TDoA‑based indoor UWB localisation system** (≤ 10 cm RMS, ≥ 50 Hz) and layer a **simulation‑to‑real RL obstacle‑avoidance policy** on a sub‑250 g quad‑rotor. The project spans **two academic terms (Sept 2025 – Mar 2026)** and culminates in a live Design‑Fair demo.  Team of three ECE under‑graduates:
 
 | Role                     | Member       | Term‑wide ownership                              |
 | ------------------------ | ------------ | ------------------------------------------------ |
@@ -18,7 +18,6 @@ Build a **TDoA‑based indoor UWB localisation system** (≤ 10 cm RMS, �
 | R2 | Update rate / latency | ≥ 50 Hz stream, end‑to‑end control loop ≤ 200 ms   |
 | R3 | Safety                | ≥ 0.5 m clearance, emergency DISARM ≤ 200 ms       |
 | R4 | Payload               | Drone (with tag & sensors) < 250 g                 |
-| R5 | Budget                | ≤ CA \$2 850 hardware                              |
 | R6 | Compliance            | RSS‑220 UWB, on‑campus micro‑drone rules           |
 
 Past team #2023694 hit 15 cm with a single drone but broke down when scaling to three due to anchor coverage and TDMA latency .  We address that by **wireless‑sync TDoA** (no tag polling), an extra anchor for geometry, and onboard fusion.
@@ -60,75 +59,10 @@ Past team #2023694 hit 15 cm with a single drone but broke down when scaling
 
 | Phase                                | Calendar     | Lead     | Key outputs                                   |
 | ------------------------------------ | ------------ | -------- | --------------------------------------------- |
-| **0 Kick‑off & Orders**              | May‑Jun 2025 | All      | Safety plan, BOM locked, repo skeleton        |
-| **1 4‑Anchor TDoA MVP**              | Jun‑Jul 2025 | Jonathan | Sub‑20 cm log demo with wired PSU (table‑top) |
-| **2 5‑Anchor wireless‑sync @ 50 Hz** | Aug‑Sep 2025 | Xiyao    | Clock‑sync firmware validated in lab          |
-| **3 Jetson EKF flight**              | Oct 2025     | Zequan   | ≤ 10 cm RMS hover test in classroom           |
-| **4 High‑fidelity sim arena**        | Nov 2025     | Jonathan | Ignition world + sensor models                |
-| **5 ORCA baseline avoidance**        | Dec 2025     | Xiyao    | Non‑RL reactive avoidance passes course       |
-| **6 PPO + Domain‑Rand training**     | Jan‑Feb 2026 | Xiyao    | > 95 % success in sim                         |
-| **7 Sim‑to‑Real transfer**           | Mar 2026     | Zequan   | Real flight video, no collisions              |
-| **8 Design‑Fair booth**              | Apr 2026     | All      | Live demo, poster, open‑source repo           |
-
-Milestones mirror but refine the draft roadmap in the MD plan  while removing the earlier TWR step and aligning with your TDoA‑only decision.
-
----
-
-## 5. Bill of Materials (revised)
-
-| Item                                    | Qty             | \$CA / unit | Sub‑total                 |
-| --------------------------------------- | --------------- | ----------- | ------------------------- |
-| DWM3001‑CDK anchors                     | **5** (1 spare) |  120        | 600                       |
-| DWM3001 tag module                      | 1 (tag)         | 90          | 90                        |
-| Tripods + USB‑C PD banks                | 5               | 35          | 175                       |
-| Holybro kit (frame + FC + ESC + motors) | 1               |  400        | 400                       |
-| RealSense D435i                         | 1               |  250        | 250                       |
-| RPLiDAR A1 (optional)                   | 1               |  110        | 110                       |
-| Li‑ion packs & charger                  |  —              |  200        | 200                       |
-| 3‑D prints, wiring, fasteners           |  —              |  150        | 150                       |
-| Contingency 15 %                        |  —              |  300        | 300                       |
-| **Total**                               |                 |             | **2 275** (< \$2 850)\*\* |
-
-(You already own Jetson + two spare Orin modules, so they’re cost‑free).
-
----
-
-## 6. Testing & Verification Plan
-
-| Stage                 | Metric                  | Method                                               |
-| --------------------- | ----------------------- | ---------------------------------------------------- |
-| Anchor‑sync           | σ(clock offset) ≤ 2 ns  | Anchor pair latency logger (logic‑analyser)          |
-| Static tag            | Pos. error ≤ 8 cm       | Laser‑measured ground‑truth grid                     |
-| Hover                 | EKF XYZ σ ≤ 10 cm       | Motion‑capture cross‑check (borrow Caps Lab rig day) |
-| Dynamic 8‑shape       | RMS ≤ 10 cm             | On‑board & mocap trajectory overlay                  |
-| Obstacle course (sim) | 95 % success            | 100 runs, random layout                              |
-| Real flight obstacle  | 3 × 5 min, 0 collisions | Classroom with soft foam pillars                     |
-
-Past team’s accuracy test rigs (Fig. 2, p. 14) are reused for ground‑truth capture .
-
----
-
-## 7. Risks & Mitigations
-
-| Risk                  | Impact | Mitigation                                                    |
-| --------------------- | ------ | ------------------------------------------------------------- |
-| Multipath > 10 cm     | Medium | Anchor height diversity + extra anchor + IMU fusion           |
-| Sync packet drop      | High   | 1 Hz resync watchdog; fall‑back to low‑rate TDMA              |
-| Payload creep > 250 g | Medium | 3‑D‑printed mounts, 2‑cell battery, remove LiDAR if needed    |
-| Sim‑to‑real gap       | High   | Domain randomisation, progressive real testing, ORCA fallback |
-
----
-
-## 8. Deliverables
-
-1. **PDR (Sep 2025)** – architecture, safety, budget.
-2. **CDR (Nov 2025)** – firmware demo + EKF report.
-3. **Mid‑Year Demo (Dec 2025)** – ORCA avoidance in sim.
-4. **Final Demo (Apr 2026)** – Live obstacle course with GUI.
-5. GitHub repo, annotated BOM, user manual, video, and IEEE‑style final paper.
-
----
-
-### Closing Notes
-
-*All* requirements are traceable to tasks and budget; phases are front‑loaded for high‑risk RF firmware.  This plan stays under budget, honours your TDoA‑only choice, and leans on proven practices (e.g. wireless sync protocol design in the DWM3001CDK doc) while avoiding pitfalls that tripped last year’s team.  Ready for sprint‑0 kick‑off!
+| **0 Kick‑off & Orders**              | Sept 2025 (Weeks 1‑2) | All      | Safety plan, repo skeleton, hardware prep       |
+| **1 5‑Anchor TDoA Bring‑Up**         | Sept‑Oct 2025 | Xiyao    | Wireless‑sync firmware, ≤20 cm RMS demo       |
+| **2 Jetson EKF Hover**               | Nov‑Dec 2025 | Zequan   | Stable hover ≤ 10 cm RMS (motion‑capture validated) |
+| **3 Obstacle Avoidance (if feasible)**| Jan‑Feb 2026 | Xiyao    | ORCA baseline in sim; PPO training with domain randomisation |
+| **4 Sim‑to‑Real Transfer (stretch)** | Feb 2026 | Jonathan | Real‑flight avoidance test (if time permits) |
+| **5 Design‑Fair Demo**               | Mar 2026 | All      | Live demo of localization (and avoidance if ready) |
+|  
