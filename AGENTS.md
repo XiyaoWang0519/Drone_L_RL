@@ -415,3 +415,40 @@ These commands make AI calls and may take up to a minute:
 ---
 
 _This guide ensures Claude Code has immediate access to Task Master's essential functionality for agentic development workflows._
+# Repository Guidelines
+
+## Project Structure & Module Organization
+- `docs/`: Project plans and reports used for requirements and context.
+- `firmware/`: Embedded code skeleton for the drone.
+  - `src/` sources, `include/` headers, `tests/` unit tests, `boards/{stm32,esp32}` board configs.
+- `config/`: Environment profiles (`development/`, `testing/`, `production/`).
+- `.env.example`: Copy to `.env` for local credentials and settings (do not commit secrets).
+
+## Build, Test, and Development Commands
+Use the toolchain for your target board. Examples:
+- Zephyr (STM32): `west build -b <board> firmware && west flash` — build and flash.
+- ESP-IDF (ESP32): `cd firmware/boards/esp32 && idf.py build flash monitor` — build/flash/serial.
+- Arduino CLI: `arduino-cli compile --fqbn esp32:esp32:s3 firmware` — quick compile.
+Record the exact steps you use in `firmware/README.md` when adding a new board or workflow.
+
+## Coding Style & Naming Conventions
+- Language: C/C++ for firmware; 4-space indentation; UTF-8; Unix line endings.
+- Files: `module_name.c|cpp` with matching `module_name.h` in `include/`.
+- APIs: functions `snake_case`, types `PascalCase`, constants/macros `UPPER_SNAKE_CASE`.
+- Keep modules small, testable, and board-agnostic; isolate HW specifics under `boards/`.
+
+## Testing Guidelines
+- Place tests in `firmware/tests/`; mirror source module names: `foo_test.c(pp)`.
+- Prefer host-run tests when feasible; otherwise use board SDK test runners.
+- Aim for coverage of safety‑critical logic (arming, failsafe, comms, sensor fusion paths).
+- Example (CMake/CTest): `cmake -S firmware -B build && cmake --build build && ctest --test-dir build`.
+
+## Commit & Pull Request Guidelines
+- Use Conventional Commits (e.g., `feat: ...`, `chore: ...`) as seen in history.
+- Branch per feature; keep PRs focused and linked to issues.
+- PRs should include: purpose/scope, affected modules, test evidence (logs/screens/serial output), and flashing steps with board name.
+- For firmware PRs, state safety considerations and how you validated on hardware/sim.
+
+## Security & Configuration Tips
+- Never commit `.env` or secrets; use `.env.example` for placeholders.
+- Document any required udev/driver setup, RF settings, and board IDs in `firmware/README.md`.
