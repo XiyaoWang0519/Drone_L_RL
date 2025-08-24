@@ -1,0 +1,12 @@
+/ {
+    leds {
+        compatible = "gpio-leds";
+        d12_led: led0 {
+            gpios = <&gpio0 14 GPIO_ACTIVE_LOW>;
+            label = "DWM3001CDK D12";
+        };
+    };
+    aliases {
+        led0 = &d12_led;
+    };
+};
