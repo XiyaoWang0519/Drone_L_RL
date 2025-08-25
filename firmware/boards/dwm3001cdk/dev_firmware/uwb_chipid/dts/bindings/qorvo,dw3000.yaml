@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+
+title: Qorvo DW3000 UWB Transceiver
+
+description: |
+  DW3000 family (e.g. DW3110) SPI-attached UWB transceiver.
+
+compatible: "qorvo,dw3000"
+
+include: [spi-device.yaml]
+
+properties:
+  irq-gpios:
+    type: phandle-array
+    required: true
+    description: Interrupt line from DW3000 to host MCU
+
+  reset-gpios:
+    type: phandle-array
+    required: true
+    description: Active-low reset output from MCU to DW3000 RSTn
+
+

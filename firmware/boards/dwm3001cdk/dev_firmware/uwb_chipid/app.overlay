@@ -1,0 +1,61 @@
+/ {
+    chosen {
+        zephyr,console = &cdc_acm_uart0;
+        zephyr,shell-uart = &cdc_acm_uart0;
+    };
+};
+
+/* USB CDC */
+&usbd { status = "okay"; };
+&zephyr_udc0 {
+    cdc_acm_uart0: cdc_acm_uart0 {
+        compatible = "zephyr,cdc-acm-uart";
+        label = "CDC_ACM_0";
+    };
+};
+
+/* --- DW3110 on SPI --- */
+/* 1) Enable the SPI controller actually wired to the DW3110 (DWM3001CDK uses SPIM3) */
+&spi3 {
+    status = "okay";
+    /* Use pinctrl (required by nrf-spim binding) */
+    pinctrl-0 = <&spi3_dwm_default>;
+    pinctrl-1 = <&spi3_dwm_sleep>;
+    pinctrl-names = "default", "sleep";
+    /* DW3110 uses a GPIO-based CS line */
+    cs-gpios = <&gpio1 6 GPIO_ACTIVE_LOW>;
+};
+
+/* 2) Create a child node describing the DW3110 on that SPI bus */
+&spi3 {
+    dwm3001c_uwb: dwm3001c_uwb@0 {
+        compatible = "qorvo,dw3000";
+        reg = <0>;
+        spi-max-frequency = <8000000>; /* start slow, you can raise after probe */
+
+        /* From DWM3001CDK board header/schematic */
+        irq-gpios  = <&gpio1 2 GPIO_ACTIVE_HIGH>;  /* DW3110 IRQ → P1.02 */
+        reset-gpios= <&gpio0 25 GPIO_ACTIVE_LOW>;  /* DW3110 RSTn → P0.25 */
+    };
+};
+
+/* Custom pinctrl groups for SPIM3 wired to DW3110 on DWM3001CDK */
+&pinctrl {
+    spi3_dwm_default: spi3_dwm_default {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 0, 3)>,
+                    <NRF_PSEL(SPIM_MOSI, 0, 8)>,
+                    <NRF_PSEL(SPIM_MISO, 0, 29)>;
+        };
+    };
+
+    spi3_dwm_sleep: spi3_dwm_sleep {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 0, 3)>,
+                    <NRF_PSEL(SPIM_MOSI, 0, 8)>,
+                    <NRF_PSEL(SPIM_MISO, 0, 29)>;
+            low-power-enable;
+        };
+    };
+};
+
