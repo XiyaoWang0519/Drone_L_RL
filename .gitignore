@@ -29,3 +29,6 @@ firmware/boards/dwm3001cdk/DW3_QM33_SDK_1
 
 # Dev notes
 /dev_notes
+
+# Temporary files
+/tmp
