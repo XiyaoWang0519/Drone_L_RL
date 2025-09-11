@@ -97,15 +97,13 @@ void main(void) {
 ```bash
 cd ~/zephyrproject
 rm -rf build/led_bringup
-west build -b nrf52833dk/nrf52833 \
-  /Users/xiyaowang/Documents/My_Space/Projects/ECE496/Drone_L_RL/firmware/boards/dwm3001cdk/dev_firmware/led_bringup \
-  -d build/led_bringup -p always -- -DPython3_EXECUTABLE="$WEST_PYTHON"
+west build -b nrf52833dk/nrf52833 /Users/xiyaowang/Documents/Projects/ECE496/Drone_L_RL/firmware/boards/dwm3001cdk/dev_firmware/led_bringup -d build/led_bringup -p always -- -DPython3_EXECUTABLE="$WEST_PYTHON"
 ```
 
 Or, if you’re running from this repo and want a relative path (same build flags):
 
 ```bash
-west build -b nrf52833dk/nrf52833 firmware/boards/dwm3001cdk/dev_firmware/led_bringup -d build/led_bringup -p always -- -DPython3_EXECUTABLE="$WEST_PYTHON"
+west build -b nrf52833dk/nrf52833 /Users/xiyaowang/Documents/Projects/ECE496/Drone_L_RL/firmware/boards/dwm3001cdk/dev_firmware/led_bringup -d build/led_bringup -p always -- -DPython3_EXECUTABLE="$WEST_PYTHON"
 ```
 
 ### Flash via J-Link (connect to J20, not J9!)
