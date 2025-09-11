@@ -8,13 +8,11 @@
 - Python ≥ 3.10 (we use pyenv + venv)
 - West installed (pip install west)
 
-Check versions:
+Quick version sanity checks:
 ```bash
-which west
+which west && west --version
 which python
 which JLinkExe
-west --version
-JLinkExe
 ```
 
 ## 2. Environment Setup
@@ -46,16 +44,9 @@ export WEST_PYTHON=$(which python)
 
 ## 3. Application Structure
 
-Our test app is under:
+App location:
 
-```bash
-firmware/boards/dwm3001cdk/dev_firmware/led_bringup/
-├── CMakeLists.txt
-├── Kconfig
-├── prj.conf
-├── app.overlay
-└── src/main.c
-```
+`firmware/boards/dwm3001cdk/dev_firmware/led_bringup/`
 
 ### app.overlay
 
@@ -111,6 +102,12 @@ west build -b nrf52833dk/nrf52833 \
   -d build/led_bringup -p always -- -DPython3_EXECUTABLE="$WEST_PYTHON"
 ```
 
+Or, if you’re running from this repo and want a relative path (same build flags):
+
+```bash
+west build -b nrf52833dk/nrf52833 firmware/boards/dwm3001cdk/dev_firmware/led_bringup -d build/led_bringup -p always -- -DPython3_EXECUTABLE="$WEST_PYTHON"
+```
+
 ### Flash via J-Link (connect to J20, not J9!)
 
 ```bash
@@ -137,3 +134,4 @@ After flashing, LED D12 should blink at ~2 Hz.
 - __Overlay parse error__: check braces `{}` and semicolons `;`, remove smart quotes.
 - __Nothing blinks__: try neighbouring pins (13, 15, 16, 28). Use a sweep tester app to discover mapping.
 
+For repository-wide conventions and common commands, see the project root `README.md`.
