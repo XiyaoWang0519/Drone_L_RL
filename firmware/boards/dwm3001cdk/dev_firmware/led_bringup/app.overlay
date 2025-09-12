@@ -1,11 +1,45 @@
+/**
+ * @brief Device Tree Overlay for LED Bring-up
+ *
+ * This overlay adds LED configuration to the base nRF52833 device tree.
+ * It defines the D12 LED on the DWM3001CDK board and creates an alias
+ * for easy reference in application code.
+ */
+
 / {
+    /**
+     * @brief LED subsystem node
+     *
+     * The "gpio-leds" compatible driver allows Zephyr to manage LEDs
+     * connected to GPIO pins. This node groups all LED definitions.
+     */
     leds {
         compatible = "gpio-leds";
+
+        /**
+         * @brief D12 LED definition
+         *
+         * Defines the D12 LED on the DWM3001CDK board:
+         * - Connected to GPIO0 pin 14
+         * - Active-low (LED turns on when GPIO is driven low)
+         * - Labeled for identification in debug output
+         *
+         * The label "d12_led" creates a reference that can be used
+         * with GPIO_DT_SPEC_GET() in the application code.
+         */
         d12_led: led0 {
-            gpios = <&gpio0 14 GPIO_ACTIVE_LOW>;
-            label = "DWM3001CDK D12";
+            gpios = <&gpio0 14 GPIO_ACTIVE_LOW>;  /* GPIO0 pin 14, active-low */
+            label = "DWM3001CDK D12";             /* Human-readable identifier */
         };
     };
+
+    /**
+     * @brief Device tree aliases
+     *
+     * Creates a shortcut alias "led0" that points to our d12_led node.
+     * This allows the application to reference the LED using DT_ALIAS(led0)
+     * instead of the full node path, making the code more readable.
+     */
     aliases {
         led0 = &d12_led;
     };

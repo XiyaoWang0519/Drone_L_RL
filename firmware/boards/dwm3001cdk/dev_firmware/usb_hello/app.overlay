@@ -1,19 +1,58 @@
+/**
+ * @brief Device Tree Overlay for USB CDC-ACM Console
+ *
+ * This overlay configures the nRF52833 USB peripheral for CDC-ACM (serial over USB)
+ * communication. It routes the system console output to a virtual serial port
+ * accessible via USB connector J20 on the DWM3001CDK board.
+ */
+
 / {
+    /**
+     * @brief System-wide device choices
+     *
+     * These properties tell Zephyr which devices to use for system services:
+     * - zephyr,console: Where kernel messages (printk) are sent
+     * - zephyr,shell-uart: Where the shell/console input/output goes
+     *
+     * Both are set to our USB CDC-ACM device for USB serial communication.
+     */
     chosen {
-        zephyr,console = &cdc_acm_uart0;
-        zephyr,shell-uart = &cdc_acm_uart0;
+        zephyr,console = &cdc_acm_uart0;     /* Route kernel prints to USB CDC */
+        zephyr,shell-uart = &cdc_acm_uart0;  /* Route shell I/O to USB CDC */
     };
 };
 
-/* Ensure the USB device controller is enabled */
+/**
+ * @brief USB Device Controller Configuration
+ *
+ * Enable the USB device controller (UDC) on the nRF52833. This is required
+ * for any USB device functionality including CDC-ACM serial communication.
+ * The UDC handles the low-level USB protocol and packet management.
+ */
 &usbd {
-    status = "okay";
+    status = "okay";  /* Enable the USB device controller */
 };
 
-/* Create the CDC-ACM instance the console points at */
+/**
+ * @brief USB Device Controller Instance
+ *
+ * Configure the specific UDC instance (zephyr_udc0) and add our CDC-ACM
+ * UART device to it. This creates a virtual serial port that appears
+ * as /dev/ttyACM* on Linux or a COM port on Windows when connected via USB.
+ */
 &zephyr_udc0 {
+    /**
+     * @brief CDC-ACM UART Device Definition
+     *
+     * Creates a USB CDC-ACM (Communication Device Class - Abstract Control Model)
+     * device that emulates a serial UART. This allows terminal applications
+     * to communicate with the board as if it were a standard serial port.
+     *
+     * The label "CDC_ACM_0" can be used to reference this device in code
+     * using DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart0)).
+     */
     cdc_acm_uart0: cdc_acm_uart0 {
-        compatible = "zephyr,cdc-acm-uart";
-        label = "CDC_ACM_0";
+        compatible = "zephyr,cdc-acm-uart";  /* Use Zephyr's CDC-ACM UART driver */
+        label = "CDC_ACM_0";                 /* Human-readable device identifier */
     };
 };
