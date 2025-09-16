@@ -38,5 +38,5 @@ def parse_packet(buf: bytes) -> Dict[str, Any]:
         "tag_tx_seq": int(seq),
         "t_tx_tag": float(t_tx),
         "anchors": anchors,
-        "clock": {"tick_hz": 499_200_000.0, "mode": "wireless_sync"},
+        "clock": {"tick_hz": 63_897_600_000.0, "mode": "wireless_sync"},
     }

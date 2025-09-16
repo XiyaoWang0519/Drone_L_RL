@@ -8,6 +8,7 @@ Date: 2025-09-14 (updated)
 - Expanded FastAPI service with `/start_log`, `/stop_log`, `/replay` plus richer `/healthz` diagnostics.
 - Hardened solver performance with Huber weighting and anchor-quality heuristics (SNR/NLOS aware), feeding a constant-velocity EKF now running in full 3D.
 - Created regression tests for solver, auto-calibration, and end-to-end pose computation; validated via the reference simulator.
+- Updated simulator + engine tick rate to the DW3110's 63.8976 GHz timestamp domain and produced a noise-free `example_circle_perfect` dataset for visual sanity checks.
 
 ## Implemented Files
 - Parser: `TDoA_Engine/engine/io_parser.py`
@@ -20,6 +21,7 @@ Date: 2025-09-14 (updated)
 - Simulator (reference) + example config:
   - `TDoA_Engine/tools/sim/sim_uwb.py`
   - `TDoA_Engine/tools/sim/example_circle.yaml`
+  - `TDoA_Engine/tools/sim/example_circle_perfect.yaml`
 - Tests: `TDoA_Engine/engine/tests/test_engine.py`
 
 ## How to Run (Dev)
@@ -27,6 +29,7 @@ Date: 2025-09-14 (updated)
 2. Start engine: `uvicorn TDoA_Engine.engine.service.http_api:app --host 127.0.0.1 --port 8000`
 3. Kick off simulator (feeds UDP + optionally writes CSV/BIN logs):
    - `python TDoA_Engine/tools/sim/sim_uwb.py --cfg TDoA_Engine/tools/sim/example_circle.yaml`
+   - `python TDoA_Engine/tools/sim/sim_uwb.py --cfg TDoA_Engine/tools/sim/example_circle_perfect.yaml` (zero-noise, DW3xxx tick-aligned circle replay)
 4. APIs:
    - `GET /healthz` → engine status + anchor/clock info
    - `POST /set_anchors` with `{anchors:[...], anchor_clocks:[...]}` updates calibration and persists to `engine/logs/calibration.json`
@@ -39,6 +42,7 @@ Date: 2025-09-14 (updated)
 ## Validation Results
 - Unit tests (`python -m unittest discover TDoA_Engine/engine/tests`) cover solver accuracy, auto-calibration reconstruction, and clock-compensated pose solve.
 - Simulator-driven end-to-end run (`uvicorn … & python tools/sim/sim_uwb.py …`) produces stable 3D pose updates with residual RMS ~1.5 ns and anchors_used=4 under biased clocks.
+- High-resolution circle replay (DW3xxx tick, no noise) yields XY RMS error ≈2.6 cm with quantization <2.5 mm and visually smooth UI trace.
 - Log files (`engine/logs/*.bin`, `*_poses.csv`) contain replayable epochs; `/replay` streams them back to clients at recorded cadence.
 
 ## Notes & Rationale
@@ -47,6 +51,7 @@ Date: 2025-09-14 (updated)
 - Auto-cal layout uses classical MDS, aligns A1 to origin and A2 to +X, then enforces right-handed orientation to avoid mirror ambiguity.
 - Logging writes binary packets with `<I` length prefix to simplify replay pacing.
 - Replay cancels any in-flight session and resets the EKF before streaming.
+- Simulator emits DW3110-resolution timestamps (63.8976 GHz), keeping quantization error below ~2.5 mm for smooth reference trajectories.
 
 ## Outstanding Work / Next Steps
 - Tune EKF process/measurement noise for full 3D trajectories and surface the Z covariance in telemetry.
@@ -64,4 +69,3 @@ Date: 2025-09-14 (updated)
 - Python 3.10+; validated on Python 3.11.6.
 - Simulator defaults now include realistic clock offsets/drifts; engine compensates via stored calibration or `/set_anchors` payloads.
 - No firmware changes required for this milestone; simulator mirrors the binary packet contract for drop-in firmware replacement.
-

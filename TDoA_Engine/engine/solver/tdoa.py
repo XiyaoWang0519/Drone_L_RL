@@ -44,36 +44,64 @@ def solve_tdoa(
     """Gauss-Newton TDoA position solver with optional measurement weights."""
     x = x0.copy()
     used = anchors.shape[0]
-    base_w = None
+    diag_base = None
     if weights is not None:
-        base_w = np.asarray(weights, dtype=float)
-        if base_w.shape[0] != drho.shape[0]:
+        diag_base = np.asarray(weights, dtype=float)
+        if diag_base.shape[0] != drho.shape[0]:
             raise ValueError("weights dimension mismatch")
+    else:
+        diag_base = np.ones_like(drho, dtype=float)
+
+    D = anchors.shape[1]
+    I = np.eye(D)
+    lam = 1e-3
+    mins = anchors.min(axis=0)
+    maxs = anchors.max(axis=0)
+    span = maxs - mins
+    margin = np.maximum(span, np.full_like(span, 3.0))
+    lower_bound = mins - margin
+    upper_bound = maxs + margin
     for _ in range(max_iter):
         f, J = residuals_and_jacobian(x, anchors, drho, a_ref=0)
         w = huber_weights(f, delta=huber_delta)
-        if base_w is not None:
-            diag = w * base_w
-        else:
-            diag = w
-        W = np.diag(diag)
-        H = J.T @ W @ J
-        g = J.T @ W @ f
-        try:
-            dx = np.linalg.solve(H, g)
-        except np.linalg.LinAlgError:
+        diag = np.clip(w * diag_base, 1e-9, None)
+        res_norm = float(np.dot(diag * f, f))
+        H = J.T @ (diag[:, None] * J)
+        g = J.T @ (diag * f)
+        mu = lam
+        success = False
+        step_norm = 0.0
+        for _ in range(8):
+            try:
+                dx = np.linalg.solve(H + mu * I, g)
+            except np.linalg.LinAlgError:
+                mu *= 10.0
+                continue
+            x_candidate = x + dx
+            x_candidate = np.clip(x_candidate, lower_bound, upper_bound)
+            dx = x_candidate - x
+            f_candidate, _ = residuals_and_jacobian(x_candidate, anchors, drho, a_ref=0)
+            w_candidate = huber_weights(f_candidate, delta=huber_delta)
+            diag_candidate = np.clip(w_candidate * diag_base, 1e-9, None)
+            res_candidate = float(np.dot(diag_candidate * f_candidate, f_candidate))
+            step_norm = float(np.linalg.norm(dx))
+            if res_candidate < res_norm or step_norm < 1e-7:
+                x = x_candidate
+                lam = max(mu * 0.25, 1e-6)
+                success = True
+                break
+            mu *= 4.0
+        if not success:
+            lam *= 10.0
+            if lam > 1e9:
+                break
+        if success and step_norm < 1e-5:
             break
-        x = x + dx
-        if np.linalg.norm(dx) < 1e-5:
-            break
+
     f, J = residuals_and_jacobian(x, anchors, drho, a_ref=0)
     w = huber_weights(f, delta=huber_delta)
-    if base_w is not None:
-        diag = w * base_w
-    else:
-        diag = w
-    W = np.diag(diag)
-    H = J.T @ W @ J
+    diag = np.clip(w * diag_base, 1e-9, None)
+    H = J.T @ (diag[:, None] * J)
     cov = None
     try:
         cov = np.linalg.inv(H)

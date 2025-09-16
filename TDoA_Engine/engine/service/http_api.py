@@ -18,6 +18,7 @@ from .log_manager import LogManager
 from .ws_stream import BroadcastManager
 
 C_AIR = 299_702_547.0
+DW3XXX_TICK_HZ = 63_897_600_000.0  # ~15.65 ps timestamp resolution on DW3110
 DEFAULT_Q_NS2 = 0.15 ** 2
 GATING_SIGMA = 3.0
 
@@ -52,7 +53,7 @@ class EngineState:
         self.last_t: Optional[float] = None
         self.ws = BroadcastManager()
         self.running = True
-        self.tick_hz = getattr(config, "TICK_HZ", 499_200_000.0)
+        self.tick_hz = getattr(config, "TICK_HZ", DW3XXX_TICK_HZ)
         self.stats: Dict[str, Any] = {}
         self.clock_params: Dict[str, Dict[str, float]] = {}
         self.log_manager = LogManager(root=_resolve_path(getattr(config, "LOG_ROOT", "engine/logs"), DEFAULT_LOG_ROOT))
@@ -426,7 +427,13 @@ async def set_anchors(payload: Dict[str, Any] = Body(...)):
     clock_payload = payload.get("anchor_clocks") or payload.get("clocks") or []
     if isinstance(clock_payload, list):
         STATE.update_clock_params(clock_payload)
-    save_calibration({"anchors": anchors_payload, "anchor_clocks": clock_payload, "frame": payload.get("frame"), "map_id": payload.get("map_id")})
+    STATE.reset_filter()
+    save_calibration({
+        "anchors": anchors_payload,
+        "anchor_clocks": clock_payload,
+        "frame": payload.get("frame"),
+        "map_id": payload.get("map_id"),
+    })
     return {"ok": True, "count": len(anchors)}
 
 

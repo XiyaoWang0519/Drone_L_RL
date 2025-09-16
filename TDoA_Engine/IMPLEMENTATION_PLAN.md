@@ -148,7 +148,7 @@ dwt_config_t cfg = {
 };
 ```
 
-- DW time‑stamp characteristics: the driver exposes 5‑byte TX/RX time‑stamps; for engine purposes we will standardize on a tick rate `tick_hz = 499_200_000.0` (≈ 2.0032 ns/tick) when converting to seconds.
+- DW time‑stamp characteristics: the driver exposes 5‑byte TX/RX time‑stamps; for engine purposes we will standardize on a tick rate `tick_hz = 63_897_600_000.0` (≈ 15.65 ps/tick) when converting to seconds.
 - Current firmware samples include USB bring‑up (`usb_hello`), DW3000 probe/ID (`uwb_chipid`), and a DS‑TWR initiator/responder pair. A TDoA epoch streamer is not yet implemented on device; the engine will be developed against the defined packet contract and the simulator in the interim.
 
 Build/flash (Zephyr):
@@ -303,7 +303,7 @@ def parse_packet(buf: bytes):
                     "cir_snr_db": a[3], "nlos_score": a[4]})
         off += struct.calcsize(ANC_FMT)
     return {"tag_tx_seq": seq, "t_tx_tag": t_tx,
-            "anchors": anc, "clock": {"tick_hz": 499_200_000.0, "mode": "wireless_sync"}}
+           "anchors": anc, "clock": {"tick_hz": 63_897_600_000.0, "mode": "wireless_sync"}}
 ```
 
 Bridge options on host:

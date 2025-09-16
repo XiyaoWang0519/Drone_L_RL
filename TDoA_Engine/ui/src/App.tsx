@@ -35,6 +35,7 @@ export default function App() {
   const [wsDirty, setWsDirty] = useState(false);
 
   const stream = usePoseStream(wsUrl, { autoConnect: true, historySize: 900 });
+  const { clearTrail } = stream;
   const latest = useMemo(() => (stream.trail.length > 0 ? stream.trail[stream.trail.length - 1] : null), [stream.trail]);
 
   useEffect(() => {
@@ -99,11 +100,12 @@ export default function App() {
         await pushAnchors(engineHttpUrl, nextAnchors, anchorClocks);
         setAnchors(nextAnchors);
         showToast("Anchors updated");
+        clearTrail();
       } catch (err) {
         showToast(err instanceof Error ? `Failed to set anchors: ${err.message}` : String(err), "error");
       }
     },
-    [anchorClocks, engineHttpUrl, showToast]
+    [anchorClocks, clearTrail, engineHttpUrl, showToast]
   );
 
   const handlePushClocks = useCallback(
@@ -112,11 +114,12 @@ export default function App() {
         await pushAnchors(engineHttpUrl, anchors, nextClocks);
         setAnchorClocks(nextClocks);
         showToast("Clock parameters updated");
+        clearTrail();
       } catch (err) {
         showToast(err instanceof Error ? `Failed to set clocks: ${err.message}` : String(err), "error");
       }
     },
-    [anchors, engineHttpUrl, showToast]
+    [anchors, clearTrail, engineHttpUrl, showToast]
   );
 
   const handleStartLog = useCallback(

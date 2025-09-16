@@ -3,7 +3,8 @@ import math, random, socket, struct, time, csv, json
 from dataclasses import dataclass
 from typing import List, Tuple
 
-TICK_HZ = 499_200_000.0
+# DW3xxx timestamp LSB is ~15.65 ps => 63.8976 GHz tick domain
+TICK_HZ = 63_897_600_000.0
 MAGIC = 0x01D3
 HDR_FMT = "<HHI d B"           # magic, len, seq, t_tx_tag_s, n_anc
 ANC_FMT = "<B Q f f f"         # anchor_id, t_rx_ticks, q_ns2, snr, nlos

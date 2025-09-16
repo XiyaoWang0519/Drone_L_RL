@@ -33,6 +33,8 @@ export function usePoseStream(url: string | null, options?: PoseStreamOptions): 
   const wsRef = useRef<WebSocket | null>(null);
   const shouldReconnectRef = useRef(false);
   const fpsSamplesRef = useRef<number[]>([]);
+  const engineTimeRef = useRef<number | null>(null);
+  const clientTimeRef = useRef<number | null>(null);
 
   const handleMessage = useCallback(
     (event: MessageEvent) => {
@@ -56,8 +58,16 @@ export function usePoseStream(url: string | null, options?: PoseStreamOptions): 
         setFps(samples.length);
 
         if (typeof data.t === "number") {
-          const latency = Math.max(0, Date.now() / 1000 - data.t) * 1000;
-          setLatencyMs(latency);
+          const nowSec = performance.now() / 1000;
+          if (engineTimeRef.current == null || clientTimeRef.current == null) {
+            engineTimeRef.current = data.t;
+            clientTimeRef.current = nowSec;
+            setLatencyMs(0);
+          } else {
+            const expectedClientTime = clientTimeRef.current + (data.t - engineTimeRef.current);
+            const latency = Math.max(0, nowSec - expectedClientTime) * 1000;
+            setLatencyMs(latency);
+          }
         } else {
           setLatencyMs(null);
         }
@@ -153,6 +163,10 @@ export function usePoseStream(url: string | null, options?: PoseStreamOptions): 
     setMessageCount(0);
     fpsSamplesRef.current = [];
     setFps(0);
+    engineTimeRef.current = null;
+    clientTimeRef.current = null;
+    setLatencyMs(null);
+    setLastMessage(null);
   }, []);
 
   useEffect(() => {
@@ -167,6 +181,8 @@ export function usePoseStream(url: string | null, options?: PoseStreamOptions): 
         // ignore
       }
       wsRef.current = null;
+      engineTimeRef.current = null;
+      clientTimeRef.current = null;
     };
   }, [autoConnect, connect, url]);
 
