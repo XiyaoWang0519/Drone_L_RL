@@ -32,3 +32,24 @@ firmware/boards/dwm3001cdk/DW3_QM33_SDK_1
 
 # Temporary files
 /tmp
+
+# Python files
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyzwz
+*.pyzwzw
+
+# Virtual environments
+.venv
+venv
+env
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
