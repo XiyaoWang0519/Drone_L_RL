@@ -70,6 +70,32 @@ class EngineState:
         self.ekf = CVEKF(dim=self.dim, q_acc=0.5)
         self.last_t = None
 
+    def set_dim(self, dim: int) -> None:
+        dim_int = max(2, min(3, int(dim)))
+        if dim_int == self.dim:
+            return
+        self.dim = dim_int
+        self.reset_filter()
+
+    def infer_dimension(self) -> int:
+        if not self.anchors:
+            return self.dim
+        coords = np.array(list(self.anchors.values()), dtype=float)
+        if coords.size == 0:
+            return self.dim
+        if coords.shape[1] < 3:
+            return 2
+        span_z = float(np.max(coords[:, 2]) - np.min(coords[:, 2]))
+        if span_z > 0.05:
+            return 3
+        if np.any(np.abs(coords[:, 2]) > 1e-3):
+            return 3
+        return 2
+
+    def update_dimension_from_anchors(self) -> None:
+        dim = self.infer_dimension()
+        self.set_dim(dim)
+
     def convert_anchor_time(self, anchor_id: str, ticks: float, tick_hz: float) -> float:
         """Return host-reference time for an anchor RX measurement."""
         t_sec = float(ticks) / float(tick_hz)
@@ -117,6 +143,7 @@ def load_calibration() -> None:
                 anchors[a["id"]] = pos
             if anchors:
                 STATE.anchors = anchors
+                STATE.update_dimension_from_anchors()
             clocks = data.get("anchor_clocks") or data.get("clocks")
             if isinstance(clocks, list):
                 STATE.update_clock_params(clocks)
@@ -131,6 +158,7 @@ def load_calibration() -> None:
         "A4": np.array([0.0, 6.0, 2.55]),
     }
     STATE.clock_params = {}
+    STATE.update_dimension_from_anchors()
 
 
 def save_calibration(payload: Dict[str, Any]) -> None:
@@ -424,6 +452,7 @@ async def set_anchors(payload: Dict[str, Any] = Body(...)):
     if not anchors:
         raise HTTPException(status_code=400, detail="no anchors provided")
     STATE.anchors = anchors
+    STATE.update_dimension_from_anchors()
     clock_payload = payload.get("anchor_clocks") or payload.get("clocks") or []
     if isinstance(clock_payload, list):
         STATE.update_clock_params(clock_payload)
