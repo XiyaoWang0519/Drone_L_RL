@@ -28,16 +28,16 @@ export function Hud({ connected, connecting, fps, latencyMs, messageCount, lastM
         right: 16,
         padding: "10px 14px",
         borderRadius: 12,
-        background: "rgba(15,23,42,0.82)",
+        background: "rgba(255,255,255,0.95)",
         backdropFilter: "blur(12px)",
-        border: "1px solid rgba(148,163,184,0.25)",
-        color: "#e2e8f0",
+        border: "1px solid #d0d0d0",
+        color: "#111111",
         fontSize: 13,
         lineHeight: 1.45,
         minWidth: 180,
       }}
     >
-      <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.12em", color: "rgba(148,163,184,0.8)", marginBottom: 6 }}>
+      <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.12em", color: "#666666", marginBottom: 6 }}>
         Engine {connectionLabel}
       </div>
       <div>fps: {fps.toFixed(0)}</div>

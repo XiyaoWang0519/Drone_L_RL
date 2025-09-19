@@ -67,12 +67,14 @@ class TestComputePose(unittest.TestCase):
     def setUp(self):
         self.prev_anchors = http_api.STATE.anchors.copy()
         self.prev_clocks = http_api.STATE.clock_params.copy()
+        self.prev_dim = http_api.STATE.dim
         http_api.STATE.anchors = {
             "A1": np.array([0.0, 0.0, 2.40]),
             "A2": np.array([8.0, 0.0, 2.65]),
             "A3": np.array([8.0, 6.0, 2.20]),
             "A4": np.array([0.0, 6.0, 2.55]),
         }
+        http_api.STATE.update_dimension_from_anchors()
         http_api.STATE.update_clock_params(
             [
                 {"id": "A1", "offset_ns": 0.0, "drift_ppm": 0.0},
@@ -86,6 +88,8 @@ class TestComputePose(unittest.TestCase):
     def tearDown(self):
         http_api.STATE.anchors = self.prev_anchors
         http_api.STATE.clock_params = self.prev_clocks
+        http_api.STATE.update_dimension_from_anchors()
+        http_api.STATE.set_dim(self.prev_dim)
         http_api.STATE.reset_filter()
 
     def test_compute_pose_with_clock_compensation(self):
@@ -117,6 +121,24 @@ class TestComputePose(unittest.TestCase):
         self.assertAlmostEqual(pose["x"], tag_pos[0], places=2)
         self.assertAlmostEqual(pose["y"], tag_pos[1], places=2)
         self.assertAlmostEqual(pose["z"], tag_pos[2], places=2)
+
+    def test_dimension_detection_from_anchor_layout(self):
+        http_api.STATE.anchors = {
+            "A1": np.array([0.0, 0.0, 0.0]),
+            "A2": np.array([5.0, 0.0, 0.0]),
+            "A3": np.array([0.0, 5.0, 0.0]),
+            "A4": np.array([5.0, 5.0, 0.0]),
+        }
+        http_api.STATE.update_dimension_from_anchors()
+        self.assertEqual(http_api.STATE.dim, 2)
+        http_api.STATE.anchors = {
+            "A1": np.array([0.0, 0.0, 0.0]),
+            "A2": np.array([5.0, 0.0, 0.0]),
+            "A3": np.array([0.0, 5.0, 1.2]),
+            "A4": np.array([5.0, 5.0, 2.0]),
+        }
+        http_api.STATE.update_dimension_from_anchors()
+        self.assertEqual(http_api.STATE.dim, 3)
 
 
 if __name__ == "__main__":

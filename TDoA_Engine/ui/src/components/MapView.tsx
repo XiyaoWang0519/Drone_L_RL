@@ -1,4 +1,6 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
+import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { Anchor, TrailPoint } from "../types";
 
 interface MapViewProps {
@@ -8,134 +10,479 @@ interface MapViewProps {
   height?: number;
 }
 
-interface ProjectedPoint {
-  x: number;
-  y: number;
+interface BoundsInfo {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  minZ: number;
+  maxZ: number;
+  spanX: number;
+  spanY: number;
+  spanZ: number;
+  center: { x: number; y: number; z: number };
+  hasPoints: boolean;
 }
 
-function project(
+const GRID_BASE_SIZE = 12;
+
+function toWorldVector(x: number, y: number, z: number): THREE.Vector3 {
+  return new THREE.Vector3(x, z, y);
+}
+
+function drawRoundedRect(
+  ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
-  minX: number,
-  minY: number,
-  scale: number,
-  padding: number,
-  height: number
-): ProjectedPoint {
-  const px = padding + (x - minX) * scale;
-  const py = height - padding - (y - minY) * scale;
-  return { x: px, y: py };
+  width: number,
+  height: number,
+  radius: number
+): void {
+  const r = Math.max(0, Math.min(radius, Math.min(width, height) / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  ctx.lineTo(x + r, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function disposeMaterial(material: THREE.Material | THREE.Material[] | undefined): void {
+  if (Array.isArray(material)) {
+    material.forEach((m) => disposeMaterial(m));
+    return;
+  }
+  if (!material) {
+    return;
+  }
+  const mat = material as THREE.Material & { map?: THREE.Texture | null };
+  if ("map" in mat && mat.map) {
+    mat.map.dispose();
+  }
+  material.dispose();
+}
+
+function disposeObject(obj: THREE.Object3D): void {
+  obj.traverse((node: THREE.Object3D) => {
+    const maybeGeom = node as { geometry?: THREE.BufferGeometry | THREE.InstancedBufferGeometry };
+    if (maybeGeom.geometry) {
+      maybeGeom.geometry.dispose();
+    }
+    const maybeMat = node as { material?: THREE.Material | THREE.Material[] };
+    if (maybeMat.material) {
+      disposeMaterial(maybeMat.material);
+    }
+  });
+}
+
+function createAnchorLabel(anchor: Anchor): THREE.Sprite {
+  const z = Number.isFinite(anchor.pos.z) ? (anchor.pos.z as number) : 0;
+  const lines = [anchor.id, `(${anchor.pos.x.toFixed(2)}, ${anchor.pos.y.toFixed(2)}, ${z.toFixed(2)})`];
+  const padding = 20;
+  const idFont = 48;
+  const subFont = 32;
+  const canvas = document.createElement("canvas");
+  const tempCtx = canvas.getContext("2d");
+  if (!tempCtx) {
+    return new THREE.Sprite();
+  }
+  tempCtx.font = `600 ${idFont}px Inter, 'Segoe UI', sans-serif`;
+  const idWidth = tempCtx.measureText(lines[0]).width;
+  tempCtx.font = `400 ${subFont}px Inter, 'Segoe UI', sans-serif`;
+  const coordWidth = tempCtx.measureText(lines[1]).width;
+  const width = Math.ceil(Math.max(idWidth, coordWidth) + padding * 2);
+  const height = Math.ceil(idFont + subFont + padding * 2.5);
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return new THREE.Sprite();
+  }
+  ctx.font = `600 ${idFont}px Inter, 'Segoe UI', sans-serif`;
+  ctx.fillStyle = "rgba(255,255,255,0.96)";
+  ctx.strokeStyle = "rgba(200,200,200,0.9)";
+  ctx.lineWidth = 4;
+  drawRoundedRect(ctx, 0, 0, width, height, 28);
+  ctx.fill();
+  ctx.stroke();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#111111";
+  ctx.font = `600 ${idFont}px Inter, 'Segoe UI', sans-serif`;
+  ctx.fillText(lines[0], width / 2, padding + idFont / 2);
+  ctx.font = `400 ${subFont}px Inter, 'Segoe UI', sans-serif`;
+  ctx.fillStyle = "#555555";
+  ctx.fillText(lines[1], width / 2, padding + idFont + subFont / 2 + 8);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.encoding = THREE.sRGBEncoding;
+  texture.needsUpdate = true;
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+  const sprite = new THREE.Sprite(material);
+  const scale = 0.006;
+  sprite.scale.set(width * scale, height * scale, 1);
+  return sprite;
 }
 
 export function MapView({ anchors, trail, width = 720, height = 520 }: MapViewProps) {
-  const { projectedAnchors, projectedTrail, info } = useMemo(() => {
-    const pts = [] as { x: number; y: number }[];
-    anchors.forEach((a) => {
-      if (Number.isFinite(a.pos.x) && Number.isFinite(a.pos.y)) {
-        pts.push({ x: a.pos.x, y: a.pos.y });
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const anchorGroupRef = useRef<THREE.Group | null>(null);
+  const trailRef = useRef<THREE.Line | null>(null);
+  const droneRef = useRef<THREE.Mesh | null>(null);
+  const gridRef = useRef<THREE.GridHelper | null>(null);
+  const animationRef = useRef<number>();
+
+  const bounds = useMemo<BoundsInfo>(() => {
+    const coords: { x: number; y: number; z: number }[] = [];
+    anchors.forEach((anchor) => {
+      const { x, y } = anchor.pos;
+      const z = Number.isFinite(anchor.pos.z) ? (anchor.pos.z as number) : 0;
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        coords.push({ x, y, z });
       }
     });
-    trail.forEach((p) => {
-      if (Number.isFinite(p.x) && Number.isFinite(p.y)) {
-        pts.push({ x: p.x, y: p.y });
+    trail.forEach((point) => {
+      const { x, y, z } = point;
+      if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+        coords.push({ x, y, z });
       }
     });
-    if (pts.length === 0) {
-      pts.push({ x: 0, y: 0 });
-      pts.push({ x: 5, y: 5 });
+    if (coords.length === 0) {
+      return {
+        minX: 0,
+        maxX: 6,
+        minY: 0,
+        maxY: 6,
+        minZ: 0,
+        maxZ: 2,
+        spanX: 6,
+        spanY: 6,
+        spanZ: 2,
+        center: { x: 3, y: 3, z: 1 },
+        hasPoints: false,
+      };
     }
-    const minX = Math.min(...pts.map((p) => p.x));
-    const maxX = Math.max(...pts.map((p) => p.x));
-    const minY = Math.min(...pts.map((p) => p.y));
-    const maxY = Math.max(...pts.map((p) => p.y));
-    const padding = 48;
+    const xs = coords.map((c) => c.x);
+    const ys = coords.map((c) => c.y);
+    const zs = coords.map((c) => c.z);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const minZ = Math.min(...zs);
+    const maxZ = Math.max(...zs);
     const spanX = Math.max(maxX - minX, 1);
     const spanY = Math.max(maxY - minY, 1);
-    const scaleX = (width - padding * 2) / spanX;
-    const scaleY = (height - padding * 2) / spanY;
-    const scale = Math.min(scaleX, scaleY);
-
-    const projectedAnchors = anchors.map((anchor) => {
-      const point = project(anchor.pos.x, anchor.pos.y, minX, minY, scale, padding, height);
-      return { anchor, point };
-    });
-    const projectedTrail = trail.map((p) => ({ point: project(p.x, p.y, minX, minY, scale, padding, height), data: p }));
+    const spanZ = Math.max(maxZ - minZ, 0.5);
     return {
-      projectedAnchors,
-      projectedTrail,
-      info: {
-        minX,
-        maxX,
-        minY,
-        maxY,
-        scale,
-        spanX,
-        spanY,
-      },
+      minX,
+      maxX,
+      minY,
+      maxY,
+      minZ,
+      maxZ,
+      spanX,
+      spanY,
+      spanZ,
+      center: { x: (minX + maxX) / 2, y: (minY + maxY) / 2, z: (minZ + maxZ) / 2 },
+      hasPoints: true,
     };
-  }, [anchors, trail, width, height]);
+  }, [anchors, trail]);
 
-  const pathD = useMemo(() => {
-    if (projectedTrail.length === 0) {
-      return "";
+  useEffect(() => {
+    const mount = containerRef.current;
+    if (!mount) {
+      return;
     }
-    return projectedTrail
-      .map(({ point }, idx) => `${idx === 0 ? "M" : "L"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`)
-      .join(" ");
-  }, [projectedTrail]);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xf7f7f7);
+    scene.fog = new THREE.Fog(0xf7f7f7, 60, 200);
+    sceneRef.current = scene;
+
+    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 2000);
+    camera.position.set(12, 8, 12);
+    cameraRef.current = camera;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x000000, 0);
+    renderer.shadowMap.enabled = false;
+    rendererRef.current = renderer;
+    const canvas = renderer.domElement;
+    canvas.style.display = "block";
+    canvas.style.width = "100%";
+    canvas.style.height = "100%";
+    canvas.style.outline = "1px solid #d6d6d6";
+    canvas.style.borderRadius = "18px";
+    mount.appendChild(canvas);
+
+    const controls = new OrbitControls(camera, canvas);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.maxDistance = 500;
+    controls.minDistance = 1;
+    controls.maxPolarAngle = Math.PI * 0.49;
+    controlsRef.current = controls;
+
+    const ambient = new THREE.AmbientLight(0xffffff, 0.7);
+    const hemi = new THREE.HemisphereLight(0xffffff, 0xf0f0f0, 0.2);
+    const directional = new THREE.DirectionalLight(0xffffff, 0.5);
+    directional.position.set(18, 24, 12);
+    directional.castShadow = false;
+    scene.add(ambient);
+    scene.add(hemi);
+    scene.add(directional);
+
+    const grid = new THREE.GridHelper(GRID_BASE_SIZE, 20, 0xb0b0b0, 0x8a8a8a);
+    const gridMaterials = Array.isArray(grid.material) ? grid.material : [grid.material];
+    gridMaterials.forEach((mat: THREE.Material) => {
+      mat.transparent = true;
+      mat.opacity = 0.35;
+    });
+    gridRef.current = grid;
+    scene.add(grid);
+
+    const axes = new THREE.AxesHelper(1.8);
+    axes.position.y = 0.01;
+    scene.add(axes);
+
+    const anchorGroup = new THREE.Group();
+    anchorGroupRef.current = anchorGroup;
+    scene.add(anchorGroup);
+
+    const trailMaterial = new THREE.LineBasicMaterial({ color: 0x444444, transparent: true, opacity: 0.85 });
+    const trailLine = new THREE.Line(new THREE.BufferGeometry(), trailMaterial);
+    trailLine.visible = false;
+    trailRef.current = trailLine;
+    scene.add(trailLine);
+
+    const droneMaterial = new THREE.MeshStandardMaterial({
+      color: 0x666666,
+      emissive: 0x1f1f1f,
+      metalness: 0.25,
+      roughness: 0.4,
+    });
+    const droneMesh = new THREE.Mesh(new THREE.SphereGeometry(0.32, 32, 32), droneMaterial);
+    droneMesh.visible = false;
+    droneRef.current = droneMesh;
+    scene.add(droneMesh);
+
+    const animate = () => {
+      controls.update();
+      renderer.render(scene, camera);
+      animationRef.current = requestAnimationFrame(animate);
+    };
+    animate();
+
+    return () => {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+      controls.dispose();
+      disposeObject(anchorGroup);
+      disposeObject(trailLine);
+      disposeObject(droneMesh);
+      disposeObject(grid);
+      disposeObject(axes);
+      renderer.dispose();
+      if (canvas.parentElement === mount) {
+        mount.removeChild(canvas);
+      }
+      rendererRef.current = null;
+      cameraRef.current = null;
+      controlsRef.current = null;
+      sceneRef.current = null;
+      anchorGroupRef.current = null;
+      trailRef.current = null;
+      droneRef.current = null;
+      gridRef.current = null;
+    };
+  }, [height, width]);
+
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    const camera = cameraRef.current;
+    if (!renderer || !camera) {
+      return;
+    }
+    renderer.setSize(width, height);
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+  }, [height, width]);
+
+  useEffect(() => {
+    const anchorGroup = anchorGroupRef.current;
+    const trailLine = trailRef.current;
+    const drone = droneRef.current;
+    const controls = controlsRef.current;
+    const camera = cameraRef.current;
+    const grid = gridRef.current;
+    if (!anchorGroup || !trailLine || !drone || !controls || !camera) {
+      return;
+    }
+
+    anchorGroup.children.slice().forEach((child: THREE.Object3D) => {
+      anchorGroup.remove(child);
+      disposeObject(child);
+    });
+
+    const worldPoints: THREE.Vector3[] = [];
+
+    anchors.forEach((anchor) => {
+      const { x, y } = anchor.pos;
+      const z = Number.isFinite(anchor.pos.z) ? (anchor.pos.z as number) : 0;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        return;
+      }
+      const worldPos = toWorldVector(x, y, z);
+      worldPoints.push(worldPos.clone());
+
+      const anchorMesh = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.2, 0.2, 0.45, 20),
+        new THREE.MeshStandardMaterial({ color: 0x333333, emissive: 0x111111, roughness: 0.45, metalness: 0.2 })
+      );
+      anchorMesh.position.copy(worldPos);
+      anchorMesh.castShadow = false;
+      anchorMesh.receiveShadow = false;
+      anchorGroup.add(anchorMesh);
+
+      const stemGeometry = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(worldPos.x, 0, worldPos.z),
+        new THREE.Vector3(worldPos.x, worldPos.y, worldPos.z),
+      ]);
+      const stemMaterial = new THREE.LineBasicMaterial({ color: 0xaaaaaa, transparent: true, opacity: 0.35 });
+      const stem = new THREE.Line(stemGeometry, stemMaterial);
+      anchorGroup.add(stem);
+
+      const label = createAnchorLabel(anchor);
+      label.position.set(worldPos.x, worldPos.y + 0.7, worldPos.z);
+      anchorGroup.add(label);
+    });
+
+    const trailPoints = trail.map((point) => toWorldVector(point.x, point.y, point.z));
+    if (trailPoints.length > 0) {
+      worldPoints.push(...trailPoints);
+    }
+
+    const previousGeometry = trailLine.geometry;
+    if (trailPoints.length > 1) {
+      trailLine.geometry = new THREE.BufferGeometry().setFromPoints(trailPoints);
+      trailLine.visible = true;
+    } else {
+      trailLine.geometry = new THREE.BufferGeometry();
+      trailLine.visible = false;
+    }
+    previousGeometry.dispose();
+
+    if (trail.length > 0) {
+      const last = trail[trail.length - 1];
+      const worldLast = toWorldVector(last.x, last.y, last.z);
+      drone.visible = true;
+      drone.position.copy(worldLast);
+    } else {
+      drone.visible = false;
+    }
+
+    const fallbackPoints = worldPoints.length > 0 ? worldPoints : [
+      toWorldVector(bounds.center.x, bounds.center.y, bounds.center.z),
+      toWorldVector(bounds.center.x + bounds.spanX * 0.5, bounds.center.y, bounds.center.z + bounds.spanY * 0.5),
+    ];
+
+    const box = new THREE.Box3().setFromPoints(fallbackPoints);
+    const centerWorld = box.getCenter(new THREE.Vector3());
+    const sizeWorld = box.getSize(new THREE.Vector3());
+    const maxSpan = Math.max(sizeWorld.x, sizeWorld.y, sizeWorld.z, 6);
+    const desiredDistance = Math.max(maxSpan * 1.15, 6);
+
+    if (grid) {
+      const base = GRID_BASE_SIZE;
+      const scaleX = Math.max(sizeWorld.x, 4) / base;
+      const scaleZ = Math.max(sizeWorld.z, 4) / base;
+      grid.scale.set(scaleX, 1, scaleZ);
+      grid.position.set(centerWorld.x, 0, centerWorld.z);
+    }
+
+    const offset = camera.position.clone().sub(controls.target);
+    if (offset.lengthSq() < 1e-6) {
+      offset.set(1, 0.6, 1);
+    }
+    offset.setLength(desiredDistance);
+    const desiredPosition = centerWorld.clone().add(offset);
+    camera.position.lerp(desiredPosition, 0.12);
+    controls.target.lerp(centerWorld, 0.12);
+    controls.update();
+    camera.far = Math.max(desiredDistance * 5, 200);
+    camera.updateProjectionMatrix();
+  }, [anchors, trail, bounds]);
 
   return (
     <div
+      ref={containerRef}
       style={{
         width,
         height,
         position: "relative",
         borderRadius: "18px",
         overflow: "hidden",
-        boxShadow: "0 18px 60px rgba(15,23,42,0.45)",
+        boxShadow: "0 18px 40px rgba(0, 0, 0, 0.08)",
+        background: "#f7f7f7",
+        border: "1px solid #e1e1e1",
       }}
       className="map-view"
     >
-      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
-        <defs>
-          <radialGradient id="bg-gradient" cx="50%" cy="50%" r="70%">
-            <stop offset="0%" stopColor="rgba(15,23,42,0.9)" />
-            <stop offset="100%" stopColor="rgba(2,6,23,0.6)" />
-          </radialGradient>
-        </defs>
-        <rect x={0} y={0} width={width} height={height} fill="url(#bg-gradient)" stroke="rgba(59,130,246,0.3)" strokeWidth={1} />
-        {/* axes */}
-        <g stroke="rgba(148,163,184,0.2)" strokeWidth={1}>
-          {[...Array(6)].map((_, idx) => {
-            const t = idx / 5;
-            const x = 48 + t * (width - 96);
-            return <line key={`v-${idx}`} x1={x} y1={48} x2={x} y2={height - 48} />;
-          })}
-          {[...Array(6)].map((_, idx) => {
-            const t = idx / 5;
-            const y = 48 + t * (height - 96);
-            return <line key={`h-${idx}`} x1={48} y1={y} x2={width - 48} y2={y} />;
-          })}
-        </g>
-        {/* anchors */}
-        {projectedAnchors.map(({ anchor, point }) => (
-          <g key={anchor.id} transform={`translate(${point.x}, ${point.y})`}>
-            <circle r={8} fill="rgba(96,165,250,0.9)" stroke="rgba(191,219,254,0.9)" strokeWidth={2} />
-            <text x={12} y={4} fontSize={12} fill="#f8fafc">{anchor.id}</text>
-            <text x={12} y={20} fontSize={10} fill="rgba(148,163,184,0.8)">({anchor.pos.x.toFixed(2)}, {anchor.pos.y.toFixed(2)}, {anchor.pos.z?.toFixed?.(2) ?? "0.00"})</text>
-          </g>
-        ))}
-        {/* trail path */}
-        {pathD && <path d={pathD} fill="none" stroke="rgba(16,185,129,0.8)" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />}
-        {/* current position */}
-        {projectedTrail.length > 0 && (
-          <g transform={`translate(${projectedTrail[projectedTrail.length - 1].point.x}, ${projectedTrail[projectedTrail.length - 1].point.y})`}>
-            <circle r={9} fill="rgba(74,222,128,0.95)" stroke="rgba(21,128,61,0.9)" strokeWidth={3} />
-          </g>
-        )}
-      </svg>
-      <div style={{ position: "absolute", top: 12, left: 16, fontSize: 12, color: "rgba(203,213,225,0.7)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
-        Span X {info.spanX.toFixed(2)} m · Span Y {info.spanY.toFixed(2)} m
+      <div
+        style={{
+          position: "absolute",
+          top: 12,
+          left: 16,
+          padding: "10px 14px",
+          borderRadius: 12,
+          background: "rgba(255,255,255,0.95)",
+          border: "1px solid #d0d0d0",
+          color: "#111111",
+          fontSize: 12,
+          lineHeight: 1.5,
+          pointerEvents: "none",
+          boxShadow: "0 6px 18px rgba(0, 0, 0, 0.08)",
+        }}
+      >
+        <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: "#666666" }}>
+          Scene bounds
+        </div>
+        <div>Span X {bounds.spanX.toFixed(2)} m</div>
+        <div>Span Y {bounds.spanY.toFixed(2)} m</div>
+        <div>
+          Altitude {bounds.minZ.toFixed(2)} – {bounds.maxZ.toFixed(2)} m ({bounds.spanZ.toFixed(2)} m span)
+        </div>
+      </div>
+      <div
+        style={{
+          position: "absolute",
+          bottom: 12,
+          left: 16,
+          padding: "8px 12px",
+          borderRadius: 10,
+          background: "rgba(255,255,255,0.95)",
+          border: "1px solid #d0d0d0",
+          fontSize: 11,
+          color: "#111111",
+          lineHeight: 1.5,
+          pointerEvents: "none",
+          boxShadow: "0 4px 16px rgba(0, 0, 0, 0.08)",
+        }}
+      >
+        <div>Rotate: drag · Pan: right-drag · Zoom: scroll</div>
+        <div>Axes → X (red), Y (green ↑ altitude), Z (blue)</div>
       </div>
     </div>
   );
