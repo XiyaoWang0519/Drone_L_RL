@@ -43,9 +43,11 @@ firmware/boards/dwm3001cdk/DW3_QM33_SDK_1
 *.pyzw
 *.pyzwz
 *.pyzwzw
+__pycache__/
 
 # Virtual environments
 .venv
+.venvs
 venv
 env
 .env
