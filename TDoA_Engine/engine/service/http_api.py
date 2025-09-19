@@ -4,7 +4,7 @@ import math
 import os
 import struct
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set
 
 import numpy as np
 from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -247,11 +247,27 @@ def compute_pose(epoch: Dict[str, Any]) -> Dict[str, Any]:
             weights=weights,
         )
         residuals = solved.get("residuals", np.zeros((len(active) - 1,)))
+        # Estimate the common bias in residuals. A large bias usually indicates the
+        # reference anchor is corrupted because every other anchor is measured
+        # relative to it. Removing this shared offset before evaluating the other
+        # anchors prevents falsely gating the good ones and lets us reject the
+        # bad reference instead.
+        bias = 0.0
+        if len(residuals):
+            if np.sum(weights) > 0.0:
+                bias = float(np.sum(weights * residuals) / np.sum(weights))
+            else:
+                bias = float(np.mean(residuals))
         gating_ids: List[str] = []
+        sigma_ref = max(ref["sigma_m"], 1e-3)
+        if abs(bias) > GATING_SIGMA * sigma_ref:
+            gating_ids.append(ref_id)
+        seen: Set[str] = set(gating_ids)
         for ridx, entry in enumerate(active[1:]):
             sigma = max(entry["sigma_m"], 1e-3)
-            if abs(residuals[ridx]) > GATING_SIGMA * sigma:
+            if abs(residuals[ridx] - bias) > GATING_SIGMA * sigma and entry["id"] not in seen:
                 gating_ids.append(entry["id"])
+                seen.add(entry["id"])
         if gating_ids and len(active) - len(gating_ids) >= min_required:
             active = [entry for entry in active if entry["id"] not in gating_ids]
             dropped.extend(gating_ids)
