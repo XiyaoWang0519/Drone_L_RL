@@ -217,10 +217,10 @@ export default function App() {
                 left: 16,
                 padding: "6px 12px",
                 borderRadius: 12,
-                background: "rgba(15,23,42,0.7)",
-                border: "1px solid rgba(148,163,184,0.3)",
+                background: "rgba(255,255,255,0.9)",
+                border: "1px solid #d0d0d0",
                 fontSize: 12,
-                color: "rgba(226,232,240,0.85)",
+                color: "#111111",
               }}
             >
               refreshing anchors…
@@ -233,11 +233,11 @@ export default function App() {
           {latest && (
             <div
               style={{
-                background: "rgba(15,23,42,0.7)",
+                background: "#f5f5f5",
                 borderRadius: 16,
                 padding: 18,
-                border: "1px solid rgba(148,163,184,0.2)",
-                color: "#e2e8f0",
+                border: "1px solid #d9d9d9",
+                color: "#111111",
                 fontSize: 14,
                 lineHeight: 1.5,
               }}

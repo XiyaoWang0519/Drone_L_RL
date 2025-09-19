@@ -87,8 +87,7 @@ class EngineState:
             return 2
         span_z = float(np.max(coords[:, 2]) - np.min(coords[:, 2]))
         if span_z > 0.05:
-            return 3
-        if np.any(np.abs(coords[:, 2]) > 1e-3):
+            # Treat anchors with >5 cm vertical spread as observably 3D
             return 3
         return 2
 

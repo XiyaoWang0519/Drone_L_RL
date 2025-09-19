@@ -27,23 +27,24 @@ const fieldStyle: React.CSSProperties = {
 };
 
 const inputStyle: React.CSSProperties = {
-  background: "rgba(15,23,42,0.75)",
-  border: "1px solid rgba(148,163,184,0.35)",
+  background: "#ffffff",
+  border: "1px solid #c4c4c4",
   borderRadius: 8,
   padding: "8px 10px",
-  color: "#e2e8f0",
+  color: "#111111",
   font: "inherit",
 };
 
 const buttonStyle: React.CSSProperties = {
-  border: "1px solid rgba(56,189,248,0.5)",
+  border: "1px solid #111111",
   borderRadius: 10,
-  background: "rgba(14,165,233,0.2)",
+  background: "#111111",
   padding: "10px 14px",
-  color: "#f8fafc",
+  color: "#ffffff",
   fontSize: 14,
   letterSpacing: "0.03em",
   cursor: "pointer",
+  transition: "background 0.2s ease, color 0.2s ease",
 };
 
 const syncButtonStyle: React.CSSProperties = {
@@ -51,8 +52,9 @@ const syncButtonStyle: React.CSSProperties = {
   padding: "8px 10px",
   fontSize: 12,
   letterSpacing: "0.08em",
-  background: "rgba(59,130,246,0.18)",
-  borderColor: "rgba(148,163,184,0.45)",
+  background: "#f5f5f5",
+  borderColor: "#c4c4c4",
+  color: "#111111",
 };
 
 export function Controls({
@@ -93,15 +95,14 @@ export function Controls({
         display: "grid",
         gap: 16,
         gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-        background: "rgba(15,23,42,0.72)",
+        background: "#f7f7f7",
         borderRadius: 16,
         padding: 20,
-        border: "1px solid rgba(148,163,184,0.2)",
-        backdropFilter: "blur(14px)",
+        border: "1px solid #d6d6d6",
       }}
     >
       <div style={fieldStyle}>
-        <label htmlFor="engine-url" style={{ fontSize: 12, color: "rgba(148,163,184,0.85)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+        <label htmlFor="engine-url" style={{ fontSize: 12, color: "#666666", letterSpacing: "0.08em", textTransform: "uppercase" }}>
           Engine HTTP URL
         </label>
         <input
@@ -113,7 +114,7 @@ export function Controls({
         />
       </div>
       <div style={fieldStyle}>
-        <label htmlFor="ws-url" style={{ fontSize: 12, color: "rgba(148,163,184,0.85)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+        <label htmlFor="ws-url" style={{ fontSize: 12, color: "#666666", letterSpacing: "0.08em", textTransform: "uppercase" }}>
           Stream WS URL
         </label>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -128,26 +129,41 @@ export function Controls({
             Sync
           </button>
         </div>
-        {wsDirty && (
-          <div style={{ fontSize: 11, color: "rgba(248,250,252,0.6)" }}>manual override</div>
-        )}
+        {wsDirty && <div style={{ fontSize: 11, color: "#666666" }}>manual override</div>}
       </div>
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <button
-          style={{ ...buttonStyle, background: "rgba(16,185,129,0.18)", borderColor: "rgba(74,222,128,0.45)" }}
+          style={{
+            ...buttonStyle,
+            ...(connecting || connected ? { background: "#c9c9c9", borderColor: "#c9c9c9", color: "#555555" } : {}),
+          }}
           onClick={onConnect}
           disabled={connecting || connected}
         >
           {connecting ? "Connecting" : connected ? "Connected" : "Connect"}
         </button>
         <button
-          style={{ ...buttonStyle, background: "rgba(244,63,94,0.12)", borderColor: "rgba(248,113,113,0.4)" }}
+          style={{
+            ...buttonStyle,
+            background: "#f5f5f5",
+            borderColor: "#111111",
+            color: "#111111",
+            opacity: !connected && !connecting ? 0.5 : 1,
+          }}
           onClick={onDisconnect}
           disabled={!connected && !connecting}
         >
           Disconnect
         </button>
-        <button style={buttonStyle} onClick={onClearTrail}>
+        <button
+          style={{
+            ...buttonStyle,
+            background: "#f5f5f5",
+            borderColor: "#c4c4c4",
+            color: "#111111",
+          }}
+          onClick={onClearTrail}
+        >
           Clear Trail
         </button>
       </div>
@@ -159,14 +175,23 @@ export function Controls({
           placeholder="Log label (optional)"
         />
         <button
-          style={{ ...buttonStyle, background: "rgba(125,211,252,0.2)", borderColor: "rgba(191,219,254,0.35)" }}
+          style={{
+            ...buttonStyle,
+            ...(logging ? { background: "#c9c9c9", borderColor: "#c9c9c9", color: "#555555" } : {}),
+          }}
           onClick={() => onStartLog(logLabel || undefined)}
           disabled={logging}
         >
           Start Log
         </button>
         <button
-          style={{ ...buttonStyle, background: "rgba(248,113,113,0.18)", borderColor: "rgba(252,165,165,0.35)" }}
+          style={{
+            ...buttonStyle,
+            background: "#f5f5f5",
+            borderColor: "#111111",
+            color: "#111111",
+            opacity: !logging ? 0.5 : 1,
+          }}
           onClick={onStopLog}
           disabled={!logging}
         >
@@ -191,7 +216,13 @@ export function Controls({
         </button>
         <button
           type="button"
-          style={{ ...buttonStyle, background: "rgba(248,113,113,0.12)", borderColor: "rgba(252,165,165,0.4)" }}
+          style={{
+            ...buttonStyle,
+            background: "#f5f5f5",
+            borderColor: "#111111",
+            color: "#111111",
+            opacity: !replaying ? 0.5 : 1,
+          }}
           onClick={onStopReplay}
           disabled={!replaying}
         >

@@ -83,9 +83,9 @@ function disposeObject(obj: THREE.Object3D): void {
 function createAnchorLabel(anchor: Anchor): THREE.Sprite {
   const z = Number.isFinite(anchor.pos.z) ? (anchor.pos.z as number) : 0;
   const lines = [anchor.id, `(${anchor.pos.x.toFixed(2)}, ${anchor.pos.y.toFixed(2)}, ${z.toFixed(2)})`];
-  const padding = 32;
-  const idFont = 64;
-  const subFont = 44;
+  const padding = 20;
+  const idFont = 48;
+  const subFont = 32;
   const canvas = document.createElement("canvas");
   const tempCtx = canvas.getContext("2d");
   if (!tempCtx) {
@@ -96,7 +96,7 @@ function createAnchorLabel(anchor: Anchor): THREE.Sprite {
   tempCtx.font = `400 ${subFont}px Inter, 'Segoe UI', sans-serif`;
   const coordWidth = tempCtx.measureText(lines[1]).width;
   const width = Math.ceil(Math.max(idWidth, coordWidth) + padding * 2);
-  const height = Math.ceil(idFont + subFont + padding * 3);
+  const height = Math.ceil(idFont + subFont + padding * 2.5);
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
@@ -104,26 +104,26 @@ function createAnchorLabel(anchor: Anchor): THREE.Sprite {
     return new THREE.Sprite();
   }
   ctx.font = `600 ${idFont}px Inter, 'Segoe UI', sans-serif`;
-  ctx.fillStyle = "rgba(15,23,42,0.78)";
-  ctx.strokeStyle = "rgba(148,163,184,0.45)";
-  ctx.lineWidth = 6;
+  ctx.fillStyle = "rgba(255,255,255,0.96)";
+  ctx.strokeStyle = "rgba(200,200,200,0.9)";
+  ctx.lineWidth = 4;
   drawRoundedRect(ctx, 0, 0, width, height, 28);
   ctx.fill();
   ctx.stroke();
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillStyle = "#f8fafc";
+  ctx.fillStyle = "#111111";
   ctx.font = `600 ${idFont}px Inter, 'Segoe UI', sans-serif`;
   ctx.fillText(lines[0], width / 2, padding + idFont / 2);
   ctx.font = `400 ${subFont}px Inter, 'Segoe UI', sans-serif`;
-  ctx.fillStyle = "rgba(226,232,240,0.85)";
+  ctx.fillStyle = "#555555";
   ctx.fillText(lines[1], width / 2, padding + idFont + subFont / 2 + 8);
   const texture = new THREE.CanvasTexture(canvas);
   texture.encoding = THREE.sRGBEncoding;
   texture.needsUpdate = true;
   const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
   const sprite = new THREE.Sprite(material);
-  const scale = 0.01;
+  const scale = 0.006;
   sprite.scale.set(width * scale, height * scale, 1);
   return sprite;
 }
@@ -204,8 +204,8 @@ export function MapView({ anchors, trail, width = 720, height = 520 }: MapViewPr
     }
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x020617);
-    scene.fog = new THREE.Fog(0x020617, 30, 140);
+    scene.background = new THREE.Color(0xf7f7f7);
+    scene.fog = new THREE.Fog(0xf7f7f7, 60, 200);
     sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 2000);
@@ -222,7 +222,7 @@ export function MapView({ anchors, trail, width = 720, height = 520 }: MapViewPr
     canvas.style.display = "block";
     canvas.style.width = "100%";
     canvas.style.height = "100%";
-    canvas.style.outline = "1px solid rgba(59,130,246,0.35)";
+    canvas.style.outline = "1px solid #d6d6d6";
     canvas.style.borderRadius = "18px";
     mount.appendChild(canvas);
 
@@ -234,16 +234,16 @@ export function MapView({ anchors, trail, width = 720, height = 520 }: MapViewPr
     controls.maxPolarAngle = Math.PI * 0.49;
     controlsRef.current = controls;
 
-    const ambient = new THREE.AmbientLight(0xf8fafc, 0.45);
-    const hemi = new THREE.HemisphereLight(0x93c5fd, 0x0f172a, 0.25);
-    const directional = new THREE.DirectionalLight(0xffffff, 0.65);
+    const ambient = new THREE.AmbientLight(0xffffff, 0.7);
+    const hemi = new THREE.HemisphereLight(0xffffff, 0xf0f0f0, 0.2);
+    const directional = new THREE.DirectionalLight(0xffffff, 0.5);
     directional.position.set(18, 24, 12);
     directional.castShadow = false;
     scene.add(ambient);
     scene.add(hemi);
     scene.add(directional);
 
-    const grid = new THREE.GridHelper(GRID_BASE_SIZE, 20, 0x475569, 0x1f2937);
+    const grid = new THREE.GridHelper(GRID_BASE_SIZE, 20, 0xb0b0b0, 0x8a8a8a);
     const gridMaterials = Array.isArray(grid.material) ? grid.material : [grid.material];
     gridMaterials.forEach((mat: THREE.Material) => {
       mat.transparent = true;
@@ -260,15 +260,15 @@ export function MapView({ anchors, trail, width = 720, height = 520 }: MapViewPr
     anchorGroupRef.current = anchorGroup;
     scene.add(anchorGroup);
 
-    const trailMaterial = new THREE.LineBasicMaterial({ color: 0x10b981, transparent: true, opacity: 0.85 });
+    const trailMaterial = new THREE.LineBasicMaterial({ color: 0x444444, transparent: true, opacity: 0.85 });
     const trailLine = new THREE.Line(new THREE.BufferGeometry(), trailMaterial);
     trailLine.visible = false;
     trailRef.current = trailLine;
     scene.add(trailLine);
 
     const droneMaterial = new THREE.MeshStandardMaterial({
-      color: 0x4ade80,
-      emissive: 0x14532d,
+      color: 0x666666,
+      emissive: 0x1f1f1f,
       metalness: 0.25,
       roughness: 0.4,
     });
@@ -349,7 +349,7 @@ export function MapView({ anchors, trail, width = 720, height = 520 }: MapViewPr
 
       const anchorMesh = new THREE.Mesh(
         new THREE.CylinderGeometry(0.2, 0.2, 0.45, 20),
-        new THREE.MeshStandardMaterial({ color: 0x60a5fa, emissive: 0x1d4ed8, roughness: 0.38, metalness: 0.2 })
+        new THREE.MeshStandardMaterial({ color: 0x333333, emissive: 0x111111, roughness: 0.45, metalness: 0.2 })
       );
       anchorMesh.position.copy(worldPos);
       anchorMesh.castShadow = false;
@@ -360,7 +360,7 @@ export function MapView({ anchors, trail, width = 720, height = 520 }: MapViewPr
         new THREE.Vector3(worldPos.x, 0, worldPos.z),
         new THREE.Vector3(worldPos.x, worldPos.y, worldPos.z),
       ]);
-      const stemMaterial = new THREE.LineBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.35 });
+      const stemMaterial = new THREE.LineBasicMaterial({ color: 0xaaaaaa, transparent: true, opacity: 0.35 });
       const stem = new THREE.Line(stemGeometry, stemMaterial);
       anchorGroup.add(stem);
 
@@ -434,8 +434,9 @@ export function MapView({ anchors, trail, width = 720, height = 520 }: MapViewPr
         position: "relative",
         borderRadius: "18px",
         overflow: "hidden",
-        boxShadow: "0 18px 60px rgba(15,23,42,0.45)",
-        background: "radial-gradient(circle at 50% 45%, rgba(15,23,42,0.88), rgba(2,6,23,0.65))",
+        boxShadow: "0 18px 40px rgba(0, 0, 0, 0.08)",
+        background: "#f7f7f7",
+        border: "1px solid #e1e1e1",
       }}
       className="map-view"
     >
@@ -446,16 +447,16 @@ export function MapView({ anchors, trail, width = 720, height = 520 }: MapViewPr
           left: 16,
           padding: "10px 14px",
           borderRadius: 12,
-          background: "rgba(15,23,42,0.72)",
-          border: "1px solid rgba(148,163,184,0.3)",
-          color: "rgba(226,232,240,0.9)",
+          background: "rgba(255,255,255,0.95)",
+          border: "1px solid #d0d0d0",
+          color: "#111111",
           fontSize: 12,
           lineHeight: 1.5,
           pointerEvents: "none",
-          boxShadow: "0 6px 18px rgba(2,6,23,0.4)",
+          boxShadow: "0 6px 18px rgba(0, 0, 0, 0.08)",
         }}
       >
-        <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: "rgba(148,163,184,0.95)" }}>
+        <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: "#666666" }}>
           Scene bounds
         </div>
         <div>Span X {bounds.spanX.toFixed(2)} m</div>
@@ -471,13 +472,13 @@ export function MapView({ anchors, trail, width = 720, height = 520 }: MapViewPr
           left: 16,
           padding: "8px 12px",
           borderRadius: 10,
-          background: "rgba(2,6,23,0.65)",
-          border: "1px solid rgba(148,163,184,0.25)",
+          background: "rgba(255,255,255,0.95)",
+          border: "1px solid #d0d0d0",
           fontSize: 11,
-          color: "rgba(226,232,240,0.78)",
+          color: "#111111",
           lineHeight: 1.5,
           pointerEvents: "none",
-          boxShadow: "0 4px 16px rgba(2,6,23,0.35)",
+          boxShadow: "0 4px 16px rgba(0, 0, 0, 0.08)",
         }}
       >
         <div>Rotate: drag · Pan: right-drag · Zoom: scroll</div>
@@ -486,4 +487,3 @@ export function MapView({ anchors, trail, width = 720, height = 520 }: MapViewPr
     </div>
   );
 }
-
