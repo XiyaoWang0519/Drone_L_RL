@@ -1,0 +1,24 @@
+seed: 42
+rate_hz: 50
+duration_s: 5
+anchors:
+  - {id: "A1", pos: {x: 0.0, y: 0.0, z: 2.40}, offset_ns: 0.0, drift_ppm: 0.0}
+  - {id: "A2", pos: {x: 8.0, y: 0.0, z: 2.65}, offset_ns: 2.5, drift_ppm: 0.35}
+  - {id: "A3", pos: {x: 8.0, y: 6.0, z: 2.20}, offset_ns: -1.8, drift_ppm: -0.20}
+  - {id: "A4", pos: {x: 0.0, y: 6.0, z: 2.55}, offset_ns: 0.0, drift_ppm: 0.10}
+trajectory:
+  kind: circle
+  center: {x: 4.0, y: 3.0, z: 1.0}
+  radius_m: 1.5
+  speed_mps: 1.0
+noise:
+  toa_sigma_ns: 0.15
+  dropout_prob: 0.05
+  nlos_prob: 0.05
+  nlos_bias_ns_exp_mean: 1.0
+transport:
+  mode: udp
+  udp_host: 127.0.0.1
+  udp_port: 9000
+  out_csv: TDoA_Engine/engine/logs/sim_epochs.csv
+  out_bin: TDoA_Engine/engine/logs/sim_epochs.bin

@@ -1,0 +1,67 @@
+
+.app-shell {
+  min-height: 100vh;
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  background: #ffffff;
+  color: #111111;
+}
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.app-title {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #111111;
+}
+
+.app-subtitle {
+  font-size: 14px;
+  color: #555555;
+}
+
+.app-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
+  gap: 24px;
+}
+
+@media (max-width: 1100px) {
+  .app-main {
+    grid-template-columns: 1fr;
+  }
+}
+
+.toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  padding: 14px 18px;
+  border-radius: 12px;
+  background: rgba(17, 17, 17, 0.92);
+  border: 1px solid rgba(17, 17, 17, 0.65);
+  color: #ffffff;
+  font-size: 14px;
+  backdrop-filter: blur(8px);
+}
+
+.toast.error {
+  background: #f0f0f0;
+  border-color: #a3a3a3;
+  color: #111111;
+}
+
+.section-title {
+  font-size: 16px;
+  font-weight: 500;
+  margin-bottom: 8px;
+}
