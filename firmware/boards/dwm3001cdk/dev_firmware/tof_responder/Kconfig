@@ -1,0 +1,23 @@
+menu "TOF responder options"
+
+config TOF_RESP_DELAY_UUS
+    int "Responder reply delay (UUS)"
+    default 250
+    range 100 2000
+    help
+      Delay between POLL reception and RESP transmission expressed in
+      UWB microseconds (UUS). This value must match the initiator's
+      expectation to obtain accurate ranges. 1 UUS is approximately
+      1 microsecond on DW3000 hardware.
+
+config TOF_RESP_LISTEN_TIMEOUT_UUS
+    int "Responder listen timeout (UUS)"
+    default 10000
+    range 1000 60000
+    help
+      DW3000 receive timeout while waiting for the SSTWR POLL frame.
+      Larger values increase power consumption but improve tolerance
+      to jitter between initiator polls.
+
+endmenu
+

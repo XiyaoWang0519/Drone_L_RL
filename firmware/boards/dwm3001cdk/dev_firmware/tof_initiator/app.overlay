@@ -1,0 +1,55 @@
+/*
+ * DWM3001CDK SSTWR initiator overlay
+ */
+
+/ {
+    chosen {
+        zephyr,console = &cdc_acm_uart0;
+        zephyr,shell-uart = &cdc_acm_uart0;
+    };
+};
+
+&usbd { status = "okay"; };
+
+&zephyr_udc0 {
+    cdc_acm_uart0: cdc_acm_uart0 {
+        compatible = "zephyr,cdc-acm-uart";
+        label = "CDC_ACM_0";
+    };
+};
+
+&spi3 {
+    status = "okay";
+    pinctrl-0 = <&spi3_dwm_default>;
+    pinctrl-1 = <&spi3_dwm_sleep>;
+    pinctrl-names = "default", "sleep";
+    cs-gpios = <&gpio1 6 GPIO_ACTIVE_LOW>;
+
+    dwm3001c_uwb: dwm3001c_uwb@0 {
+        compatible = "qorvo,dw3000";
+        reg = <0>;
+        spi-max-frequency = <8000000>;
+        irq-gpios = <&gpio1 2 GPIO_ACTIVE_HIGH>;
+        reset-gpios = <&gpio0 25 GPIO_ACTIVE_LOW>;
+    };
+};
+
+&pinctrl {
+    spi3_dwm_default: spi3_dwm_default {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 0, 3)>,
+                    <NRF_PSEL(SPIM_MOSI, 0, 8)>,
+                    <NRF_PSEL(SPIM_MISO, 0, 29)>;
+        };
+    };
+
+    spi3_dwm_sleep: spi3_dwm_sleep {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 0, 3)>,
+                    <NRF_PSEL(SPIM_MOSI, 0, 8)>,
+                    <NRF_PSEL(SPIM_MISO, 0, 29)>;
+            low-power-enable;
+        };
+    };
+};
+
