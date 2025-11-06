@@ -6,7 +6,6 @@
 #include <zephyr/sys/printk.h>
 #include <zephyr/usb/usb_device.h>
 
-#include <errno.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -109,9 +108,7 @@ static void poll_console_keys(void)
     while (uart_poll_in(cdc_dev, &c) == 0) {
         if (c == 's' || c == 'S') {
             running = !running;
-            const char *state = running ? "resumed" : "paused";
-            printk("RESP: console %s (press 's' to toggle)\n", state);
-            LOG_INF("Console %s", state);
+            printk("[console] %s\n", running ? "start" : "pause");
         }
     }
 }
@@ -119,10 +116,7 @@ static void poll_console_keys(void)
 static void usb_ready_wait(void)
 {
     /* Bring up the USB CDC ACM device */
-    int ret = usb_enable(NULL);
-    if (ret && ret != -EALREADY) {
-        LOG_WRN("usb_enable failed (%d)", ret);
-    }
+    (void)usb_enable(NULL);
 
     cdc_dev = DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart0));
     for (int i = 0; i < 20 && !device_is_ready(cdc_dev); ++i) {
@@ -130,7 +124,6 @@ static void usb_ready_wait(void)
     }
 
     if (!cdc_dev || !device_is_ready(cdc_dev)) {
-        LOG_WRN("CDC ACM device not ready; continuing without host");
         return;
     }
 
@@ -142,13 +135,7 @@ static void usb_ready_wait(void)
         }
         k_msleep(50);
     }
-
-    if (!dtr) {
-        printk("RESP: host did not assert DTR; continuing without terminal\n");
-        LOG_WRN("No DTR from host after timeout");
-    } else {
-        k_msleep(50);
-    }
+    k_msleep(50);
 }
 
 /* -------------------------------------------------------------------------- */
