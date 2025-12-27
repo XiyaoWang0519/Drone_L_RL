@@ -6,6 +6,7 @@
 #include <zephyr/sys/printk.h>
 #include <zephyr/usb/usb_device.h>
 
+#include <stdbool.h>
 #include <string.h>
 
 #include "deca_device_api.h"
@@ -73,23 +74,44 @@ static uint64_t get_tx_timestamp_u64(void)
     return ts5_to_u64(ts);
 }
 
+static const struct device *cdc_dev;
+static volatile bool running = true;
+
+static void poll_console_keys(void)
+{
+    if (!cdc_dev || !device_is_ready(cdc_dev)) {
+        return;
+    }
+
+    unsigned char c;
+    while (uart_poll_in(cdc_dev, &c) == 0) {
+        if (c == 's' || c == 'S') {
+            running = !running;
+            printk("[console] %s\n", running ? "start" : "pause");
+        }
+    }
+}
+
 static void usb_ready_wait(void)
 {
     (void)usb_enable(NULL);
-    k_msleep(100);
 
-    const struct device *const uart_dev = DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart0));
-    int tries = 50;
-    while (!device_is_ready(uart_dev) && tries--) {
+    cdc_dev = DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart0));
+    for (int i = 0; i < 20 && !device_is_ready(cdc_dev); ++i) {
         k_msleep(100);
     }
 
+    if (!cdc_dev || !device_is_ready(cdc_dev)) {
+        return;
+    }
+
     uint32_t dtr = 0;
-    while (1) {
-        (void)uart_line_ctrl_get(uart_dev, UART_LINE_CTRL_DTR, &dtr);
+    while (true) {
+        (void)uart_line_ctrl_get(cdc_dev, UART_LINE_CTRL_DTR, &dtr);
         if (dtr) {
             break;
         }
+        /* Keep USB alive while we wait for a host to open the port */
         k_msleep(50);
     }
     k_msleep(50);
@@ -270,6 +292,9 @@ void main(void)
     k_msleep(3000);
     printk("\n[DWM3001CDK] SSTWR initiator starting\n");
     LOG_INF("Initiator boot");
+    if (cdc_dev && device_is_ready(cdc_dev)) {
+        printk("Press 's' to toggle start/pause\n");
+    }
 
     k_sem_init(&sem_tx_done, 0, 1);
     k_sem_init(&sem_rx_done, 0, 1);
@@ -303,6 +328,11 @@ void main(void)
     uint32_t missed = 0;
 
     while (1) {
+        poll_console_keys();
+        if (!running) {
+            k_msleep(50);
+            continue;
+        }
         struct tof_msg_hdr poll = {
             .type = TOF_MSG_POLL,
             .seq = seq,
@@ -353,6 +383,7 @@ void main(void)
         }
 
         seq++;
+        poll_console_keys();
         k_msleep(RANGING_PERIOD_MS);
     }
 }

@@ -6,6 +6,7 @@
 #include <zephyr/sys/printk.h>
 #include <zephyr/usb/usb_device.h>
 
+#include <stdbool.h>
 #include <string.h>
 
 /* Qorvo DW3000 driver headers */
@@ -94,23 +95,41 @@ static uint64_t get_tx_timestamp_u64(void)
 /* USB helper                                                                 */
 /* -------------------------------------------------------------------------- */
 
+static const struct device *cdc_dev;
+static volatile bool running = true;
+
+static void poll_console_keys(void)
+{
+    if (!cdc_dev || !device_is_ready(cdc_dev)) {
+        return;
+    }
+
+    unsigned char c;
+    while (uart_poll_in(cdc_dev, &c) == 0) {
+        if (c == 's' || c == 'S') {
+            running = !running;
+            printk("[console] %s\n", running ? "start" : "pause");
+        }
+    }
+}
+
 static void usb_ready_wait(void)
 {
     /* Bring up the USB CDC ACM device */
     (void)usb_enable(NULL);
 
-    /* Give the host a moment to enumerate */
-    k_msleep(100);
-
-    const struct device *const uart_dev = DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart0));
-    int tries = 50; /* ~5 seconds total */
-    while (!device_is_ready(uart_dev) && tries--) {
+    cdc_dev = DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart0));
+    for (int i = 0; i < 20 && !device_is_ready(cdc_dev); ++i) {
         k_msleep(100);
     }
 
+    if (!cdc_dev || !device_is_ready(cdc_dev)) {
+        return;
+    }
+
     uint32_t dtr = 0;
-    while (1) {
-        (void)uart_line_ctrl_get(uart_dev, UART_LINE_CTRL_DTR, &dtr);
+    for (int i = 0; i < 40; ++i) {
+        (void)uart_line_ctrl_get(cdc_dev, UART_LINE_CTRL_DTR, &dtr);
         if (dtr) {
             break;
         }
@@ -291,6 +310,9 @@ void main(void)
     //usb_ready_wait();
     printk("\n[DWM3001CDK] SSTWR responder starting\n");
     LOG_INF("Responder boot");
+    if (cdc_dev && device_is_ready(cdc_dev)) {
+        printk("Press 's' to toggle start/pause\n");
+    }
 
     k_sem_init(&sem_tx_done, 0, 1);
     k_sem_init(&sem_rx_done, 0, 1);
@@ -319,6 +341,11 @@ void main(void)
     uint32_t poll_counter = 0;
 
     while (1) {
+        poll_console_keys();
+        if (!running) {
+            k_msleep(50);
+            continue;
+        }
         dwt_setrxtimeout(rx_timeout);
         dwt_rxenable(DWT_START_RX_IMMEDIATE);
 
@@ -386,6 +413,7 @@ void main(void)
         printk("RESP: seq=%u poll_ts=%llu resp_ts=%llu delay_dtu=%u\n",
                seq, t_rx_poll, t_tx_resp, payload->reply_delay_dtu);
         LOG_INF("responded seq=%u poll_ts=%llu resp_ts=%llu", seq, t_rx_poll, t_tx_resp);
+        poll_console_keys();
     }
 }
 
