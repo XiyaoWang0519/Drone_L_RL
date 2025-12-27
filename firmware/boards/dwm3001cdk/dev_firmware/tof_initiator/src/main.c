@@ -155,20 +155,29 @@ static void on_rx_err(const dwt_cb_data_t *cb)
 
 static int dw3110_radio_init(void)
 {
+    printk("dw3110_radio_init: assert reset\n");
     dw_port_reset_assert();
     k_msleep(2);
+    printk("dw3110_radio_init: deassert reset\n");
     dw_port_reset_deassert();
     k_msleep(5);
 
+    printk("dw3110_radio_init: dwt_probe\n");
     if (dwt_probe((struct dwt_probe_s *)&dw3000_probe_interf) < 0) {
+        printk("dw3110_radio_init: dwt_probe failed\n");
         return -EIO;
     }
+    printk("dw3110_radio_init: probe ok\n");
     while (!dwt_checkidlerc()) {
+        printk("dw3110_radio_init: waiting for IDLE_RC\n");
         k_busy_wait(50);
     }
+    printk("dw3110_radio_init: IDLE_RC ready\n");
     if (dwt_initialise(DWT_READ_OTP_ALL) != DWT_SUCCESS) {
+        printk("dw3110_radio_init: dwt_initialise failed\n");
         return -EIO;
     }
+    printk("dw3110_radio_init: dwt_initialise ok\n");
 
     dwt_config_t cfg = {
         .chan = 9,
@@ -185,18 +194,27 @@ static int dw3110_radio_init(void)
         .stsLength = DWT_STS_LEN_32,
         .pdoaMode = DWT_PDOA_M0,
     };
+    printk("dw3110_radio_init: configuring radio\n");
     if (dwt_configure(&cfg) != DWT_SUCCESS) {
+        printk("dw3110_radio_init: dwt_configure failed\n");
         return -EIO;
     }
+    printk("dw3110_radio_init: configure ok\n");
 
+    printk("dw3110_radio_init: disable frame filter\n");
     dwt_configureframefilter(DWT_FF_DISABLE, 0);
+    printk("dw3110_radio_init: frame filter disabled\n");
+    printk("dw3110_radio_init: enable LNA/PA\n");
     dwt_setlnapamode(DWT_LNA_ENABLE | DWT_PA_ENABLE);
+    printk("dw3110_radio_init: LNA/PA enabled\n");
 
+    printk("dw3110_radio_init: set interrupts\n");
     dwt_setinterrupt(DWT_INT_TXFRS_BIT_MASK |
                          DWT_INT_RXFCG_BIT_MASK |
                          DWT_INT_RXFTO_BIT_MASK |
                          DWT_INT_RXPTO_BIT_MASK,
                      0, DWT_ENABLE_INT);
+    printk("dw3110_radio_init: interrupts configured\n");
 
     dwt_callbacks_s cbs = {0};
     cbs.cbTxDone = on_tx_done;
@@ -204,6 +222,8 @@ static int dw3110_radio_init(void)
     cbs.cbRxTo = on_rx_to;
     cbs.cbRxErr = on_rx_err;
     dwt_setcallbacks(&cbs);
+    printk("dw3110_radio_init: callbacks registered\n");
+    printk("dw3110_radio_init: callbacks registered\n");
 
     return 0;
 }
@@ -244,8 +264,10 @@ static int32_t compute_range_mm(uint64_t t_tx_poll, uint64_t t_rx_resp, uint64_t
 }
 
 void main(void)
-{
+{   
+    k_msleep(3000);
     usb_ready_wait();
+    k_msleep(3000);
     printk("\n[DWM3001CDK] SSTWR initiator starting\n");
     LOG_INF("Initiator boot");
 
@@ -269,6 +291,8 @@ void main(void)
         LOG_ERR("dw3110_radio_init failed");
         return;
     }
+
+    printk("After init\n");
 
     dwt_setrxaftertxdelay(RESP_EXPECT_DLY_UUS);
     dwt_setrxtimeout(RESP_RX_TIMEOUT_UUS);
@@ -332,5 +356,3 @@ void main(void)
         k_msleep(RANGING_PERIOD_MS);
     }
 }
-
-

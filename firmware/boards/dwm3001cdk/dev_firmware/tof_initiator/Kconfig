@@ -27,3 +27,6 @@ config TOF_RANGING_PERIOD_MS
 
 endmenu
 
+source "Kconfig.zephyr"
+
+

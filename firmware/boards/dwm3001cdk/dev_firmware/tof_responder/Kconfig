@@ -21,3 +21,4 @@ config TOF_RESP_LISTEN_TIMEOUT_UUS
 
 endmenu
 
+source "Kconfig.zephyr"

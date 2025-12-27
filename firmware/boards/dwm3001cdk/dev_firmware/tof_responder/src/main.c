@@ -117,6 +117,43 @@ static void usb_ready_wait(void)
         k_msleep(50);
     }
     k_msleep(50);
+    return;
+}
+
+static void wait_for_dtr(void) {
+    /* Get a reference to our USB CDC-ACM UART device defined in the overlay */
+    const struct device *const dev = DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart0));
+
+    /* If the device isn't ready, skip waiting (device might not be configured) */
+    if (!device_is_ready(dev)) {
+        return;
+    }
+
+    uint32_t dtr = 0;  /* Data Terminal Ready flag */
+
+    /* Enable the USB device stack. Ignore errors if already enabled.
+     * This brings up the USB peripheral and makes the CDC device visible
+     * to the host computer. */
+    (void)usb_enable(NULL);
+
+    /* Poll the DTR (Data Terminal Ready) signal for up to 5 seconds.
+     * DTR is set by terminal applications when they open the serial port.
+     * We check every 500ms for a maximum of 10 attempts. */
+    for (int i = 0; i < 10; ++i) {
+        /* Query the current DTR state from the UART device */
+        uart_line_ctrl_get(dev, UART_LINE_CTRL_DTR, &dtr);
+
+        /* If DTR is set (terminal connected), we can proceed */
+        if (dtr) {
+            return;
+        }
+
+        /* Wait 500ms before checking again */
+        k_msleep(500);
+    }
+
+    /* If we reach here, no terminal connected within 5 seconds.
+     * We'll proceed anyway, but initial prints might be lost. */
 }
 
 /* -------------------------------------------------------------------------- */
@@ -250,7 +287,8 @@ static int dw3110_radio_init(void)
 
 void main(void)
 {
-    usb_ready_wait();
+    wait_for_dtr();
+    //usb_ready_wait();
     printk("\n[DWM3001CDK] SSTWR responder starting\n");
     LOG_INF("Responder boot");
 
