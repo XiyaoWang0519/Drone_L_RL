@@ -4,6 +4,7 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/usb/usb_device.h>
 
 #include <stdbool.h>
@@ -84,7 +85,10 @@ static void poll_console_keys(void)
     }
 
     unsigned char c;
-    while (uart_poll_in(cdc_dev, &c) == 0) {
+    for (int i = 0; i < 8; ++i) {
+        if (uart_poll_in(cdc_dev, &c) != 0) {
+            break;
+        }
         if (c == 's' || c == 'S') {
             running = !running;
             printk("[console] %s\n", running ? "start" : "pause");
@@ -118,13 +122,24 @@ static void usb_ready_wait(void)
 }
 
 static struct gpio_callback irq_cb;
+static struct k_work uwb_isr_work;
+static atomic_t uwb_isr_pending;
+
+static void uwb_isr_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    atomic_clear(&uwb_isr_pending);
+    dwt_isr();
+}
 
 static void uwb_irq_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
     ARG_UNUSED(dev);
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
-    dwt_isr();
+    if (atomic_cas(&uwb_isr_pending, 0, 1)) {
+        k_work_submit(&uwb_isr_work);
+    }
 }
 
 static int irq_setup(void)
@@ -300,6 +315,8 @@ void main(void)
     k_sem_init(&sem_rx_done, 0, 1);
     k_sem_init(&sem_rx_to, 0, 1);
     k_sem_init(&sem_rx_err, 0, 1);
+    k_work_init(&uwb_isr_work, uwb_isr_work_handler);
+    atomic_clear(&uwb_isr_pending);
 
     if (dw_port_init()) {
         printk("DW port init failed\n");
@@ -326,8 +343,14 @@ void main(void)
     uint8_t seq = 0;
     uint32_t success = 0;
     uint32_t missed = 0;
+    bool loop_started = false;
+    bool trace_once = true;
 
     while (1) {
+        if (!loop_started) {
+            printk("INIT: loop running\n");
+            loop_started = true;
+        }
         poll_console_keys();
         if (!running) {
             k_msleep(50);
@@ -337,9 +360,45 @@ void main(void)
             .type = TOF_MSG_POLL,
             .seq = seq,
         };
-        dwt_writetxdata(sizeof(poll), (uint8_t *)&poll, 0);
+        if (trace_once) {
+            printk("INIT: tx stage=write data\n");
+        }
+        int tx_data_ret = dwt_writetxdata(sizeof(poll), (uint8_t *)&poll, 0);
+        if (trace_once) {
+            printk("INIT: tx stage=write data ret=%d\n", tx_data_ret);
+        }
+        if (tx_data_ret != DWT_SUCCESS) {
+            missed++;
+            printk("INIT: seq=%u writetxdata failed (success=%u missed=%u)\n",
+                   seq, success, missed);
+            LOG_ERR("writetxdata failed seq=%u (succ=%u miss=%u)", seq, success, missed);
+            dwt_forcetrxoff();
+            seq++;
+            k_msleep(RANGING_PERIOD_MS);
+            continue;
+        }
+
+        if (trace_once) {
+            printk("INIT: tx stage=write fctrl\n");
+        }
         dwt_writetxfctrl(sizeof(poll), 0, 1);
-        dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
+        if (trace_once) {
+            printk("INIT: tx stage=starttx\n");
+        }
+        int tx_ret = dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
+        if (trace_once) {
+            printk("INIT: tx stage=starttx ret=%d\n", tx_ret);
+            trace_once = false;
+        }
+        if (tx_ret != DWT_SUCCESS) {
+            missed++;
+            printk("INIT: seq=%u starttx failed (success=%u missed=%u)\n", seq, success, missed);
+            LOG_ERR("starttx failed seq=%u (succ=%u miss=%u)", seq, success, missed);
+            dwt_forcetrxoff();
+            seq++;
+            k_msleep(RANGING_PERIOD_MS);
+            continue;
+        }
         
         int tx_success = (k_sem_take(&sem_tx_done, K_MSEC(5)) == 0);
         if (!tx_success) {

@@ -4,6 +4,7 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/usb/usb_device.h>
 
 #include <stdbool.h>
@@ -180,13 +181,24 @@ static void wait_for_dtr(void) {
 /* -------------------------------------------------------------------------- */
 
 static struct gpio_callback irq_cb;
+static struct k_work uwb_isr_work;
+static atomic_t uwb_isr_pending;
+
+static void uwb_isr_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    atomic_clear(&uwb_isr_pending);
+    dwt_isr();
+}
 
 static void uwb_irq_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
     ARG_UNUSED(dev);
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
-    dwt_isr();
+    if (atomic_cas(&uwb_isr_pending, 0, 1)) {
+        k_work_submit(&uwb_isr_work);
+    }
 }
 
 static int irq_setup(void)
@@ -318,6 +330,8 @@ void main(void)
     k_sem_init(&sem_rx_done, 0, 1);
     k_sem_init(&sem_rx_to, 0, 1);
     k_sem_init(&sem_rx_err, 0, 1);
+    k_work_init(&uwb_isr_work, uwb_isr_work_handler);
+    atomic_clear(&uwb_isr_pending);
 
     if (dw_port_init()) {
         printk("DW port init failed\n");
@@ -416,5 +430,4 @@ void main(void)
         poll_console_keys();
     }
 }
-
 
