@@ -23,6 +23,13 @@
 #include "deca_interface.h"         /* DW3000 interface definitions */
 #include "deca_probe_interface.h"   /* Probe interface structure */
 
+#define DW3000_PORT_LOG_MUTEX 0
+#if DW3000_PORT_LOG_MUTEX
+#define DW3000_PORT_PRINTK(...) printk(__VA_ARGS__)
+#else
+#define DW3000_PORT_PRINTK(...) do { } while (0)
+#endif
+
 /**
  * @brief Device tree node reference for the DW3000 UWB device
  *
@@ -87,7 +94,7 @@ decaIrqStatus_t decamutexon(void)
 {
     if (k_is_in_isr()) {
         unsigned int key = irq_lock();
-        printk("decamutexon: ISR lock key=0x%x\n", key);
+        DW3000_PORT_PRINTK("decamutexon: ISR lock key=0x%x\n", key);
         return (decaIrqStatus_t)(key | DECA_IRQ_KEY_FLAG);
     }
 
@@ -97,9 +104,9 @@ decaIrqStatus_t decamutexon(void)
         return 0;
     }
 
-    printk("decamutexon: thread %p taking mutex\n", self);
+    DW3000_PORT_PRINTK("decamutexon: thread %p taking mutex\n", self);
     k_mutex_lock(&dw_mutex, K_FOREVER);
-    printk("decamutexon: thread %p got mutex\n", self);
+    DW3000_PORT_PRINTK("decamutexon: thread %p got mutex\n", self);
     dw_mutex_owner = self;
     dw_mutex_depth = 1;
     return 0;
@@ -114,7 +121,7 @@ void decamutexoff(decaIrqStatus_t s)
 {
     if ((s & DECA_IRQ_KEY_FLAG) != 0U) {
         unsigned int key = (unsigned int)(s & ~DECA_IRQ_KEY_FLAG);
-        printk("decamutexoff: ISR unlock key=0x%x\n", key);
+        DW3000_PORT_PRINTK("decamutexoff: ISR unlock key=0x%x\n", key);
         irq_unlock(key);
         return;
     }
@@ -124,7 +131,7 @@ void decamutexoff(decaIrqStatus_t s)
         dw_mutex_depth--;
         if (dw_mutex_depth == 0U) {
             dw_mutex_owner = NULL;
-            printk("decamutexoff: thread %p releasing mutex\n", self);
+            DW3000_PORT_PRINTK("decamutexoff: thread %p releasing mutex\n", self);
             k_mutex_unlock(&dw_mutex);
         }
     }

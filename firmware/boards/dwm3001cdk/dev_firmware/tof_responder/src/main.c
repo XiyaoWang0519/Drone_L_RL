@@ -50,6 +50,8 @@ struct __packed tof_resp_payload {
 #define RESP_DELAY_UUS       CONFIG_TOF_RESP_DELAY_UUS
 #define RESP_DELAY_DTU       ((uint64_t)RESP_DELAY_UUS * UUS_TO_DWT_TIME)
 #define POLL_RX_TIMEOUT_UUS  CONFIG_TOF_RESP_LISTEN_TIMEOUT_UUS
+#define RESP_TX_GUARD_UUS    500
+#define RESP_TX_GUARD_DTU    ((uint32_t)RESP_TX_GUARD_UUS * UUS_TO_DWT_TIME)
 
 /* -------------------------------------------------------------------------- */
 /* GPIO/IRQ wiring from the Devicetree overlay                                */
@@ -78,6 +80,7 @@ static inline uint64_t ts5_to_u64(const uint8_t ts[5])
            ((uint64_t)ts[2] << 16) | ((uint64_t)ts[1] << 8) | (uint64_t)ts[0];
 }
 
+
 static uint64_t get_rx_timestamp_u64(void)
 {
     uint8_t ts[5] = {0};
@@ -91,6 +94,7 @@ static uint64_t get_tx_timestamp_u64(void)
     dwt_readtxtimestamp(ts);
     return ts5_to_u64(ts);
 }
+
 
 /* -------------------------------------------------------------------------- */
 /* USB helper                                                                 */
@@ -181,14 +185,29 @@ static void wait_for_dtr(void) {
 /* -------------------------------------------------------------------------- */
 
 static struct gpio_callback irq_cb;
-static struct k_work uwb_isr_work;
-static atomic_t uwb_isr_pending;
+#define UWB_ISR_STACK_SIZE 1536
+#define UWB_ISR_PRIORITY   0
 
-static void uwb_isr_work_handler(struct k_work *work)
+static struct k_sem uwb_isr_sem;
+static struct k_thread uwb_isr_thread;
+K_THREAD_STACK_DEFINE(uwb_isr_stack, UWB_ISR_STACK_SIZE);
+static atomic_t uwb_ready;
+
+static void uwb_isr_thread_fn(void *arg1, void *arg2, void *arg3)
 {
-    ARG_UNUSED(work);
-    atomic_clear(&uwb_isr_pending);
-    dwt_isr();
+    ARG_UNUSED(arg1);
+    ARG_UNUSED(arg2);
+    ARG_UNUSED(arg3);
+
+    while (1) {
+        k_sem_take(&uwb_isr_sem, K_FOREVER);
+        if (!atomic_get(&uwb_ready)) {
+            continue;
+        }
+        while (dwt_checkirq()) {
+            dwt_isr();
+        }
+    }
 }
 
 static void uwb_irq_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
@@ -196,8 +215,8 @@ static void uwb_irq_handler(const struct device *dev, struct gpio_callback *cb, 
     ARG_UNUSED(dev);
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
-    if (atomic_cas(&uwb_isr_pending, 0, 1)) {
-        k_work_submit(&uwb_isr_work);
+    if (atomic_get(&uwb_ready)) {
+        k_sem_give(&uwb_isr_sem);
     }
 }
 
@@ -308,6 +327,7 @@ static int dw3110_radio_init(void)
     cbs.cbRxTo = on_rx_to;
     cbs.cbRxErr = on_rx_err;
     dwt_setcallbacks(&cbs);
+    atomic_set(&uwb_ready, 1);
 
     return 0;
 }
@@ -330,8 +350,11 @@ void main(void)
     k_sem_init(&sem_rx_done, 0, 1);
     k_sem_init(&sem_rx_to, 0, 1);
     k_sem_init(&sem_rx_err, 0, 1);
-    k_work_init(&uwb_isr_work, uwb_isr_work_handler);
-    atomic_clear(&uwb_isr_pending);
+    k_sem_init(&uwb_isr_sem, 0, 1);
+    atomic_clear(&uwb_ready);
+    k_thread_create(&uwb_isr_thread, uwb_isr_stack, UWB_ISR_STACK_SIZE,
+                    uwb_isr_thread_fn, NULL, NULL, NULL,
+                    UWB_ISR_PRIORITY, 0, K_NO_WAIT);
 
     if (dw_port_init()) {
         printk("DW port init failed\n");
@@ -390,9 +413,11 @@ void main(void)
         uint64_t t_rx_poll = last_rx_ts;
 
         /* Schedule the response */
-        uint32_t resp_tx_time32 = (uint32_t)((t_rx_poll + RESP_DELAY_DTU) >> 8);
-        dwt_setdelayedtrxtime(resp_tx_time32);
-        uint64_t scheduled_tx = (((uint64_t)(resp_tx_time32 & 0xFFFFFFFEUL)) << 8) + tx_ant_delay;
+        uint64_t target_dtu = t_rx_poll + RESP_DELAY_DTU;
+        uint32_t reply_delay_dtu = (uint32_t)(target_dtu - t_rx_poll);
+        uint32_t resp_tx_time32 = (uint32_t)(target_dtu >> 8);
+        uint64_t scheduled_tx = (((uint64_t)(resp_tx_time32 & 0xFFFFFFFEUL)) << 8) +
+                                tx_ant_delay;
 
         uint8_t tx_frame[sizeof(struct tof_msg_hdr) + sizeof(struct tof_resp_payload)] = {0};
         struct tof_msg_hdr *resp_hdr = (struct tof_msg_hdr *)tx_frame;
@@ -401,11 +426,12 @@ void main(void)
 
         struct tof_resp_payload *payload = (struct tof_resp_payload *)(tx_frame + sizeof(struct tof_msg_hdr));
         payload->resp_tx_ts = scheduled_tx;
-        payload->reply_delay_dtu = (uint32_t)RESP_DELAY_DTU;
+        payload->reply_delay_dtu = reply_delay_dtu;
 
         dwt_writetxdata(sizeof(tx_frame), tx_frame, 0);
         dwt_writetxfctrl(sizeof(tx_frame), 0, 1);
 
+        dwt_setdelayedtrxtime(resp_tx_time32);
         dwt_setrxaftertxdelay(0);
         dwt_setrxtimeout(0);
         if (dwt_starttx(DWT_START_TX_DELAYED) == DWT_ERROR) {
@@ -430,4 +456,3 @@ void main(void)
         poll_console_keys();
     }
 }
-
