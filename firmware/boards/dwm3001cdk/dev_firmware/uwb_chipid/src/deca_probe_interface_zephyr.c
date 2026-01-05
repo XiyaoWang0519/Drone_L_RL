@@ -18,6 +18,7 @@
 #include <zephyr/drivers/gpio.h>    /* GPIO driver APIs */
 #include <zephyr/irq.h>             /* Interrupt management APIs */
 #include <string.h>                 /* Memory functions: memcpy(), memset() */
+#include <stdbool.h>                /* Boolean helpers */
 
 #include "deca_device_api.h"        /* DW3000 driver APIs and types */
 #include "deca_interface.h"         /* DW3000 interface definitions */
@@ -61,6 +62,7 @@ static const struct spi_dt_spec uwb_spi = SPI_DT_SPEC_GET(UWB_NODE, SPI_WORD_SET
  * to ensure the DW3000 is awake and responsive before communication.
  */
 static const struct gpio_dt_spec uwb_reset = GPIO_DT_SPEC_GET(UWB_NODE, reset_gpios);
+static const struct gpio_dt_spec uwb_irq = GPIO_DT_SPEC_GET(UWB_NODE, irq_gpios);
 
 /* Forward declarations for functions defined in dw3000_port.c */
 void dw_port_reset_assert(void);    /* Assert DW3000 reset */
@@ -79,6 +81,35 @@ void dw_port_reset_deassert(void);  /* Deassert DW3000 reset */
 static K_MUTEX_DEFINE(dw_mutex);
 static k_tid_t dw_mutex_owner;
 static uint32_t dw_mutex_depth;
+static bool dw_irq_suspended;
+
+static void dw3000_irq_suspend(void)
+{
+    if (!device_is_ready(uwb_irq.port)) {
+        return;
+    }
+
+    int ret = gpio_pin_interrupt_configure_dt(&uwb_irq, GPIO_INT_DISABLE);
+    if (ret == 0) {
+        dw_irq_suspended = true;
+    } else {
+        DW3000_PORT_PRINTK("dw3000 irq suspend failed: %d\n", ret);
+    }
+}
+
+static void dw3000_irq_resume(void)
+{
+    if (!dw_irq_suspended || !device_is_ready(uwb_irq.port)) {
+        return;
+    }
+
+    int ret = gpio_pin_interrupt_configure_dt(&uwb_irq, GPIO_INT_EDGE_TO_ACTIVE);
+    if (ret == 0) {
+        dw_irq_suspended = false;
+    } else {
+        DW3000_PORT_PRINTK("dw3000 irq resume failed: %d\n", ret);
+    }
+}
 
 /**
  * @brief Acquire mutex for DW3000 driver thread safety
@@ -109,6 +140,7 @@ decaIrqStatus_t decamutexon(void)
     DW3000_PORT_PRINTK("decamutexon: thread %p got mutex\n", self);
     dw_mutex_owner = self;
     dw_mutex_depth = 1;
+    dw3000_irq_suspend();
     return 0;
 }
 
@@ -132,6 +164,7 @@ void decamutexoff(decaIrqStatus_t s)
         if (dw_mutex_depth == 0U) {
             dw_mutex_owner = NULL;
             DW3000_PORT_PRINTK("decamutexoff: thread %p releasing mutex\n", self);
+            dw3000_irq_resume();
             k_mutex_unlock(&dw_mutex);
         }
     }
