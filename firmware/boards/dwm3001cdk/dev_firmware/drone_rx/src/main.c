@@ -276,19 +276,44 @@ void main(void)
             rx_active = false;
             rx_idle = 0;
 
-            struct uwb_blink_frame frame;
-            if (uwb_blink_unpack(rx_buf, rx_len, &frame)) {
-                rx_ok++;
-                printk("DRONE: id=%u seq=%u slot=%u flags=%u ts=%llu ok=%u\n",
-                       frame.beacon_id,
-                       frame.superframe_seq,
-                       frame.slot_id,
-                       frame.flags,
-                       (unsigned long long)last_rx_ts,
-                       rx_ok);
+            if (rx_len >= 1 && rx_buf[0] == UWB_FRAME_TYPE_BLINK) {
+                struct uwb_blink_frame frame;
+                if (uwb_blink_unpack(rx_buf, rx_len, &frame)) {
+                    rx_ok++;
+                    printk("DRONE: BLINK id=%u seq=%u slot=%u flags=%u ts=%llu ok=%u\n",
+                           frame.beacon_id,
+                           frame.superframe_seq,
+                           frame.slot_id,
+                           frame.flags,
+                           (unsigned long long)last_rx_ts,
+                           rx_ok);
+                } else {
+                    rx_err++;
+                    printk("DRONE: BLINK parse error len=%u ts=%llu err=%u\n",
+                           rx_len,
+                           (unsigned long long)last_rx_ts,
+                           rx_err);
+                }
+            } else if (rx_len >= 1 && rx_buf[0] == UWB_FRAME_TYPE_SYNC) {
+                struct uwb_sync_frame sync;
+                if (uwb_sync_unpack(rx_buf, rx_len, &sync)) {
+                    rx_ok++;
+                    printk("DRONE: SYNC master=%u seq=%u t1=%llu ts=%llu ok=%u\n",
+                           sync.master_id,
+                           sync.sync_seq,
+                           (unsigned long long)sync.t1_master,
+                           (unsigned long long)last_rx_ts,
+                           rx_ok);
+                } else {
+                    rx_err++;
+                    printk("DRONE: SYNC parse error len=%u ts=%llu err=%u\n",
+                           rx_len,
+                           (unsigned long long)last_rx_ts,
+                           rx_err);
+                }
             } else {
                 rx_err++;
-                printk("DRONE: short frame len=%u ts=%llu err=%u\n",
+                printk("DRONE: unknown frame type len=%u ts=%llu err=%u\n",
                        rx_len,
                        (unsigned long long)last_rx_ts,
                        rx_err);
