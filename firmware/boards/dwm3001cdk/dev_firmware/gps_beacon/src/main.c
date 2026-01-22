@@ -50,7 +50,7 @@ static uint64_t get_tx_timestamp_u64(void)
 
 static uint32_t get_sys_time_u32(void)
 {
-    uint8_t ts[4] = {0};
+    uint8_t ts[5] = {0};
     dwt_readsystime(ts);
     return ((uint32_t)ts[3] << 24) | ((uint32_t)ts[2] << 16) |
            ((uint32_t)ts[1] << 8) | (uint32_t)ts[0];
@@ -151,7 +151,10 @@ static int irq_setup(void)
         return ret;
     }
     gpio_init_callback(&irq_cb, uwb_irq_handler, BIT(uwb_irq.pin));
-    gpio_add_callback(uwb_irq.port, &irq_cb);
+    ret = gpio_add_callback(uwb_irq.port, &irq_cb);
+    if (ret) {
+        return ret;
+    }
     return 0;
 }
 
@@ -226,7 +229,7 @@ static uint32_t guard_tx_time(uint32_t target_dtu, uint32_t now_dtu,
                               uint32_t guard_dtu, uint32_t slot_offset_dtu)
 {
     uint32_t delta = target_dtu - now_dtu;
-    if (delta <= guard_dtu) {
+    if (delta <= guard_dtu || delta > 0x80000000UL) {
         return now_dtu + guard_dtu + slot_offset_dtu;
     }
     return target_dtu;

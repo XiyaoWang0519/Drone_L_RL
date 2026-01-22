@@ -8,6 +8,6 @@ source "${ZEPHYR_VENV}/bin/activate"
 export WEST_PYTHON="$(which python)"
 
 cd "${ZEPHYR_PROJECT}"
-west build -b nrf52833dk/nrf52833 firmware/boards/dwm3001cdk/dev_firmware/tof_initiator \
-  -d build/tof_initiator -p always
-west flash -r jlink -d build/tof_initiator
+west build -b nrf52833dk/nrf52833 firmware/boards/dwm3001cdk/dev_firmware/gps_beacon \
+  -d build/gps_beacon -p always
+west flash -r jlink -d build/gps_beacon

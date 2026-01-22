@@ -133,7 +133,10 @@ static int irq_setup(void)
         return ret;
     }
     gpio_init_callback(&irq_cb, uwb_irq_handler, BIT(uwb_irq.pin));
-    gpio_add_callback(uwb_irq.port, &irq_cb);
+    ret = gpio_add_callback(uwb_irq.port, &irq_cb);
+    if (ret) {
+        return ret;
+    }
     return 0;
 }
 
