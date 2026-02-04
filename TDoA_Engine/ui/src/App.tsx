@@ -7,6 +7,9 @@ import { Hud } from "./components/Hud";
 import { Controls } from "./components/Controls";
 import { AnchorEditor } from "./components/AnchorEditor";
 import { ClockEditor } from "./components/ClockEditor";
+import { Sidebar } from "./components/Sidebar";
+import { TopBar } from "./components/TopBar";
+import { BottomPanel, TabId } from "./components/BottomPanel";
 import {
   fetchAnchors,
   setAnchors as pushAnchors,
@@ -23,6 +26,13 @@ interface ToastState {
   kind: "ok" | "error";
 }
 
+const BOTTOM_TABS = [
+  { id: "pose" as TabId, label: "Pose" },
+  { id: "anchors" as TabId, label: "Anchors" },
+  { id: "clocks" as TabId, label: "Clocks" },
+  { id: "connection" as TabId, label: "Connection" },
+];
+
 export default function App() {
   const [engineHttpUrl, setEngineHttpUrl] = useState<string>(ENGINE_HTTP_URL);
   const [wsUrl, setWsUrl] = useState<string>(ENGINE_WS_URL);
@@ -33,6 +43,8 @@ export default function App() {
   const [loadingAnchors, setLoadingAnchors] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [wsDirty, setWsDirty] = useState(false);
+  const [activeView, setActiveView] = useState<"live" | "config" | "replay">("live");
+  const [activeTab, setActiveTab] = useState<TabId>("pose");
 
   const stream = usePoseStream(wsUrl, { autoConnect: true, historySize: 900 });
   const { clearTrail } = stream;
@@ -168,38 +180,97 @@ export default function App() {
     }
   }, [engineHttpUrl, showToast]);
 
+  const renderPoseTab = () => {
+    if (!latest) {
+      return (
+        <div style={{ color: "var(--text-tertiary)", fontSize: "var(--text-sm)" }}>
+          No pose data received yet. Connect to the engine to start receiving data.
+        </div>
+      );
+    }
+    return (
+      <div className="stats-grid" style={{ maxWidth: 600 }}>
+        <div className="stat-item">
+          <span className="stat-label">Sequence</span>
+          <span className="stat-value">{latest.seq}</span>
+        </div>
+        <div className="stat-item">
+          <span className="stat-label">Timestamp</span>
+          <span className="stat-value">{latest.t.toFixed(3)} s</span>
+        </div>
+        <div className="stat-item">
+          <span className="stat-label">Position X</span>
+          <span className="stat-value">{latest.x.toFixed(3)} m</span>
+        </div>
+        <div className="stat-item">
+          <span className="stat-label">Position Y</span>
+          <span className="stat-value">{latest.y.toFixed(3)} m</span>
+        </div>
+        <div className="stat-item">
+          <span className="stat-label">Position Z</span>
+          <span className="stat-value">{latest.z.toFixed(3)} m</span>
+        </div>
+        <div className="stat-item">
+          <span className="stat-label">Trail Points</span>
+          <span className="stat-value">{stream.trail.length}</span>
+        </div>
+      </div>
+    );
+  };
+
+  const renderConnectionTab = () => (
+    <Controls
+      engineHttpUrl={engineHttpUrl}
+      setEngineHttpUrl={setEngineHttpUrl}
+      wsUrl={wsUrl}
+      setWsUrl={handleSetWsUrl}
+      wsDirty={wsDirty}
+      onSyncWs={handleSyncWs}
+      connected={stream.connected}
+      connecting={stream.connecting}
+      logging={logging}
+      replaying={replaying}
+      onConnect={stream.connect}
+      onDisconnect={stream.disconnect}
+      onClearTrail={stream.clearTrail}
+      onStartLog={handleStartLog}
+      onStopLog={handleStopLog}
+      onReplay={handleReplay}
+      onStopReplay={handleStopReplay}
+    />
+  );
+
+  const renderTabContent = () => {
+    switch (activeTab) {
+      case "pose":
+        return renderPoseTab();
+      case "anchors":
+        return <AnchorEditor anchors={anchors} onSave={handlePushAnchors} />;
+      case "clocks":
+        return <ClockEditor clocks={anchorClocks} onSave={handlePushClocks} />;
+      case "connection":
+        return renderConnectionTab();
+      default:
+        return null;
+    }
+  };
+
   return (
     <div className="app-shell">
-      <header className="app-header">
-        <div>
-          <div className="app-title">TDoA Engine Console</div>
-          <div className="app-subtitle">Monitor, replay, and calibrate the indoor localization engine.</div>
-        </div>
-        <div className="app-subtitle">Anchors: {anchors.length || "-"}</div>
-      </header>
-
-      <Controls
-        engineHttpUrl={engineHttpUrl}
-        setEngineHttpUrl={setEngineHttpUrl}
-        wsUrl={wsUrl}
-        setWsUrl={handleSetWsUrl}
-        wsDirty={wsDirty}
-        onSyncWs={handleSyncWs}
+      <Sidebar activeView={activeView} onViewChange={setActiveView} />
+      
+      <TopBar
         connected={stream.connected}
         connecting={stream.connecting}
+        fps={stream.fps}
+        latencyMs={stream.latencyMs}
+        anchorCount={anchors.length}
         logging={logging}
         replaying={replaying}
-        onConnect={stream.connect}
-        onDisconnect={stream.disconnect}
-        onClearTrail={stream.clearTrail}
-        onStartLog={handleStartLog}
-        onStopLog={handleStopLog}
-        onReplay={handleReplay}
-        onStopReplay={handleStopReplay}
       />
 
-      <main className="app-main">
-        <div style={{ position: "relative" }}>
+      <main className="main-content">
+        <div className="map-container">
           <MapView anchors={anchors} trail={stream.trail} />
           <Hud
             connected={stream.connected}
@@ -210,47 +281,19 @@ export default function App() {
             lastMessage={stream.lastMessage}
           />
           {loadingAnchors && (
-            <div
-              style={{
-                position: "absolute",
-                top: 12,
-                left: 16,
-                padding: "6px 12px",
-                borderRadius: 12,
-                background: "rgba(255,255,255,0.9)",
-                border: "1px solid #d0d0d0",
-                fontSize: 12,
-                color: "#111111",
-              }}
-            >
-              refreshing anchors…
+            <div className="loading-overlay">
+              Refreshing anchors...
             </div>
           )}
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-          <AnchorEditor anchors={anchors} onSave={handlePushAnchors} />
-          <ClockEditor clocks={anchorClocks} onSave={handlePushClocks} />
-          {latest && (
-            <div
-              style={{
-                background: "#f5f5f5",
-                borderRadius: 16,
-                padding: 18,
-                border: "1px solid #d9d9d9",
-                color: "#111111",
-                fontSize: 14,
-                lineHeight: 1.5,
-              }}
-            >
-              <div className="section-title">Latest pose</div>
-              <div>seq: {latest.seq}</div>
-              <div>
-                position: {latest.x.toFixed(3)} m, {latest.y.toFixed(3)} m, {latest.z.toFixed(3)} m
-              </div>
-              <div>timestamp: {latest.t.toFixed(3)} s</div>
-            </div>
-          )}
-        </div>
+
+        <BottomPanel
+          tabs={BOTTOM_TABS}
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+        >
+          {renderTabContent()}
+        </BottomPanel>
       </main>
 
       {toast && (

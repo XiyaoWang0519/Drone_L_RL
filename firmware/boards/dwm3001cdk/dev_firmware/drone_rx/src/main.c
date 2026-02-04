@@ -17,6 +17,9 @@ int dw_port_init(void);
 void dw_port_reset_assert(void);
 void dw_port_reset_deassert(void);
 
+#define TS40_MASK   ((1ULL << 40) - 1ULL)
+#define DWT_TICK_HZ 63897600000.0
+
 #define UWB_NODE DT_NODELABEL(dwm3001c_uwb)
 static const struct gpio_dt_spec uwb_irq = GPIO_DT_SPEC_GET(UWB_NODE, irq_gpios);
 
@@ -39,6 +42,26 @@ static uint64_t get_rx_timestamp_u64(void)
     uint8_t ts[5] = {0};
     dwt_readrxtimestamp(ts, DWT_COMPAT_NONE);
     return ts5_to_u64(ts);
+}
+
+static int64_t unwrap_ts40(uint64_t raw, uint64_t *prev_raw, bool *have_prev, int64_t *acc)
+{
+    uint64_t masked = raw & TS40_MASK;
+    if (!*have_prev) {
+        *have_prev = true;
+        *prev_raw = masked;
+        *acc = (int64_t)masked;
+        return *acc;
+    }
+    uint64_t dt = (masked - *prev_raw) & TS40_MASK;
+    *acc += (int64_t)dt;
+    *prev_raw = masked;
+    return *acc;
+}
+
+static double ticks_to_ns(double ticks)
+{
+    return ticks * 1e9 / DWT_TICK_HZ;
 }
 
 static const struct device *cdc_dev;
@@ -252,6 +275,19 @@ void main(void)
     uint32_t rx_err = 0;
     uint32_t rx_idle = 0;
 
+    bool sync_est_valid = false;
+    double sync_a = 1.0;
+    double sync_b = 0.0;
+    bool have_pair = false;
+    int64_t prev_t1_u = 0;
+    int64_t prev_t2_u = 0;
+    bool t1_have_prev = false;
+    uint64_t t1_prev_raw = 0;
+    int64_t t1_acc = 0;
+    bool t2_have_prev = false;
+    uint64_t t2_prev_raw = 0;
+    int64_t t2_acc = 0;
+
     while (1) {
         poll_console_keys();
         if (!running) {
@@ -298,12 +334,39 @@ void main(void)
                 struct uwb_sync_frame sync;
                 if (uwb_sync_unpack(rx_buf, rx_len, &sync)) {
                     rx_ok++;
+                    uint64_t t2_drone = last_rx_ts;
+                    int64_t t1_u = unwrap_ts40(sync.t1_master, &t1_prev_raw, &t1_have_prev, &t1_acc);
+                    int64_t t2_u = unwrap_ts40(t2_drone, &t2_prev_raw, &t2_have_prev, &t2_acc);
                     printk("DRONE: SYNC master=%u seq=%u t1=%llu ts=%llu ok=%u\n",
                            sync.master_id,
                            sync.sync_seq,
                            (unsigned long long)sync.t1_master,
-                           (unsigned long long)last_rx_ts,
+                           (unsigned long long)t2_drone,
                            rx_ok);
+
+                    if (sync_est_valid) {
+                        double pred_t2 = sync_a * (double)t1_u + sync_b;
+                        double err_ticks = (double)t2_u - pred_t2;
+                        printk("DRONE: SYNC_ERR seq=%u err_ns=%.2f\n",
+                               sync.sync_seq,
+                               ticks_to_ns(err_ticks));
+                    }
+
+                    if (have_pair) {
+                        int64_t dt1 = t1_u - prev_t1_u;
+                        int64_t dt2 = t2_u - prev_t2_u;
+                        if (dt1 != 0) {
+                            sync_a = (double)dt2 / (double)dt1;
+                            sync_b = (double)t2_u - sync_a * (double)t1_u;
+                            sync_est_valid = true;
+                            printk("DRONE: EST drift_ppm=%.3f\n",
+                                   (sync_a - 1.0) * 1e6);
+                        }
+                    }
+
+                    prev_t1_u = t1_u;
+                    prev_t2_u = t2_u;
+                    have_pair = true;
                 } else {
                     rx_err++;
                     printk("DRONE: SYNC parse error len=%u ts=%llu err=%u\n",

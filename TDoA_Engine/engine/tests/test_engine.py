@@ -122,6 +122,50 @@ class TestComputePose(unittest.TestCase):
         self.assertAlmostEqual(pose["y"], tag_pos[1], places=2)
         self.assertAlmostEqual(pose["z"], tag_pos[2], places=2)
 
+    def test_compute_pose_degrades_without_clock_compensation(self):
+        tag_pos = np.array([3.2, 2.6, 1.3], dtype=float)
+        t_tx = 1.0
+        tick_hz = http_api.STATE.tick_hz
+        anchors = http_api.STATE.anchors
+        epoch = {"tag_tx_seq": 1, "t_tx_tag": t_tx, "anchors": [], "clock": {"tick_hz": tick_hz}}
+
+        true_clocks = {
+            "A1": {"offset_ns": 0.0, "drift_ppm": 0.0},
+            "A2": {"offset_ns": 2.5, "drift_ppm": 0.0},
+            "A3": {"offset_ns": -1.8, "drift_ppm": 0.0},
+            "A4": {"offset_ns": 0.0, "drift_ppm": 0.0},
+        }
+
+        for aid, pos in anchors.items():
+            dist = np.linalg.norm(tag_pos - pos)
+            t_true = t_tx + dist / C_AIR
+            params = true_clocks.get(aid, {"offset_ns": 0.0, "drift_ppm": 0.0})
+            offset = params.get("offset_ns", 0.0) * 1e-9
+            drift = params.get("drift_ppm", 0.0) * 1e-6
+            t_anchor = (1.0 + drift) * t_true + offset
+            ticks = t_anchor * tick_hz
+            epoch["anchors"].append(
+                {
+                    "id": aid,
+                    "t_rx_anc": ticks,
+                    "q": 0.15 ** 2,
+                    "cir_snr_db": 20.0,
+                    "nlos_score": 0.0,
+                }
+            )
+
+        http_api.STATE.update_clock_params(
+            [{"id": aid, "offset_ns": 0.0, "drift_ppm": 0.0} for aid in true_clocks.keys()]
+        )
+        http_api.STATE.reset_filter()
+        result = http_api.compute_pose(epoch)
+        self.assertTrue(result["ok"])
+        pose = result["pose"]
+        est = np.array([pose["x"], pose["y"], pose["z"]], dtype=float)
+        err_m = float(np.linalg.norm(est - tag_pos))
+        # 2.5 ns ~ 0.75 m equivalent range error, so the pose should noticeably degrade.
+        self.assertGreater(err_m, 0.25)
+
     def test_dimension_detection_from_anchor_layout(self):
         http_api.STATE.anchors = {
             "A1": np.array([0.0, 0.0, 0.0]),
