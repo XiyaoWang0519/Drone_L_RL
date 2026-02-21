@@ -64,6 +64,8 @@ static const struct spi_dt_spec uwb_spi = SPI_DT_SPEC_GET(UWB_NODE, SPI_WORD_SET
 static const struct gpio_dt_spec uwb_reset = GPIO_DT_SPEC_GET(UWB_NODE, reset_gpios);
 static const struct gpio_dt_spec uwb_irq = GPIO_DT_SPEC_GET(UWB_NODE, irq_gpios);
 
+#define DW3000_WAKEUP_CS_PULSE_US 600U
+
 /* Forward declarations for functions defined in dw3000_port.c */
 void dw_port_reset_assert(void);    /* Assert DW3000 reset */
 void dw_port_reset_deassert(void);  /* Deassert DW3000 reset */
@@ -217,20 +219,27 @@ void deca_usleep(unsigned long time_us)
  */
 static void wakeup_device_with_io(void)
 {
-    printk("wakeup_device_with_io: entry\n");
-    if (!device_is_ready(uwb_reset.port)) {
-        printk("wakeup_device_with_io: reset GPIO not ready, fallback delay\n");
-        k_busy_wait(2000);
-        printk("wakeup_device_with_io: exit (fallback)\n");
+    const struct spi_cs_control *cs_ctrl = &uwb_spi.config.cs;
+
+    /* Vendor-recommended wake path: keep CS active for >500 us. */
+    if ((cs_ctrl->gpio.port != NULL) && device_is_ready(cs_ctrl->gpio.port)) {
+        (void)gpio_pin_configure_dt(&cs_ctrl->gpio, GPIO_OUTPUT_INACTIVE);
+        (void)gpio_pin_set_dt(&cs_ctrl->gpio, 1);
+        k_busy_wait(DW3000_WAKEUP_CS_PULSE_US);
+        (void)gpio_pin_set_dt(&cs_ctrl->gpio, 0);
+        k_busy_wait(200);
         return;
     }
 
-    /* We already held the DW3110 in reset inside dw3110_radio_init().
-     * Toggling it again here appears to brown out the USB CDC bridge,
-     * so just provide a guard delay instead of touching the pin. */
-    printk("wakeup_device_with_io: skip reset toggle (already awake)\n");
+    if (device_is_ready(uwb_reset.port)) {
+        dw_port_reset_assert();
+        k_msleep(2);
+        dw_port_reset_deassert();
+        k_msleep(2);
+        return;
+    }
+
     k_busy_wait(2000);
-    printk("wakeup_device_with_io: exit\n");
 }
 
 /* ============================================================================
