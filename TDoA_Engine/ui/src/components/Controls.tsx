@@ -20,42 +20,24 @@ interface ControlsProps {
   onStopReplay: () => Promise<void>;
 }
 
-const fieldStyle: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 6,
-};
+function SectionHeader({ title, description }: { title: string; description?: string }) {
+  return (
+    <div style={{ marginBottom: "var(--space-4)" }}>
+      <h3 className="section-title">{title}</h3>
+      {description && <p className="section-subtitle">{description}</p>}
+    </div>
+  );
+}
 
-const inputStyle: React.CSSProperties = {
-  background: "#ffffff",
-  border: "1px solid #c4c4c4",
-  borderRadius: 8,
-  padding: "8px 10px",
-  color: "#111111",
-  font: "inherit",
-};
-
-const buttonStyle: React.CSSProperties = {
-  border: "1px solid #111111",
-  borderRadius: 10,
-  background: "#111111",
-  padding: "10px 14px",
-  color: "#ffffff",
-  fontSize: 14,
-  letterSpacing: "0.03em",
-  cursor: "pointer",
-  transition: "background 0.2s ease, color 0.2s ease",
-};
-
-const syncButtonStyle: React.CSSProperties = {
-  ...buttonStyle,
-  padding: "8px 10px",
-  fontSize: 12,
-  letterSpacing: "0.08em",
-  background: "#f5f5f5",
-  borderColor: "#c4c4c4",
-  color: "#111111",
-};
+function Divider() {
+  return (
+    <div style={{ 
+      height: 1, 
+      background: "var(--separator)", 
+      margin: "var(--space-5) 0" 
+    }} />
+  );
+}
 
 export function Controls({
   engineHttpUrl,
@@ -90,143 +72,162 @@ export function Controls({
   };
 
   return (
-    <div
-      style={{
-        display: "grid",
-        gap: 16,
-        gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-        background: "#f7f7f7",
-        borderRadius: 16,
-        padding: 20,
-        border: "1px solid #d6d6d6",
-      }}
-    >
-      <div style={fieldStyle}>
-        <label htmlFor="engine-url" style={{ fontSize: 12, color: "#666666", letterSpacing: "0.08em", textTransform: "uppercase" }}>
-          Engine HTTP URL
-        </label>
-        <input
-          id="engine-url"
-          style={inputStyle}
-          value={engineHttpUrl}
-          onChange={(evt) => setEngineHttpUrl(evt.target.value)}
-          placeholder="http://127.0.0.1:8000"
-        />
-      </div>
-      <div style={fieldStyle}>
-        <label htmlFor="ws-url" style={{ fontSize: 12, color: "#666666", letterSpacing: "0.08em", textTransform: "uppercase" }}>
-          Stream WS URL
-        </label>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
+      {/* Connection Section */}
+      <SectionHeader 
+        title="Engine Connection" 
+        description="Configure the HTTP and WebSocket endpoints"
+      />
+      
+      <div style={{ display: "grid", gap: "var(--space-4)", gridTemplateColumns: "1fr 1fr" }}>
+        <div className="form-group">
+          <label htmlFor="engine-url" className="form-label">
+            HTTP URL
+          </label>
           <input
-            id="ws-url"
-            style={{ ...inputStyle, flex: 1 }}
-            value={wsUrl}
-            onChange={(evt) => setWsUrl(evt.target.value)}
-            placeholder="ws://127.0.0.1:8000/stream"
+            id="engine-url"
+            className="form-input"
+            value={engineHttpUrl}
+            onChange={(evt) => setEngineHttpUrl(evt.target.value)}
+            placeholder="http://127.0.0.1:8000"
           />
-          <button type="button" style={syncButtonStyle} onClick={onSyncWs}>
-            Sync
-          </button>
         </div>
-        {wsDirty && <div style={{ fontSize: 11, color: "#666666" }}>manual override</div>}
+        <div className="form-group">
+          <label htmlFor="ws-url" className="form-label">
+            WebSocket URL
+          </label>
+          <div style={{ display: "flex", gap: "var(--space-2)" }}>
+            <input
+              id="ws-url"
+              className="form-input"
+              style={{ flex: 1 }}
+              value={wsUrl}
+              onChange={(evt) => setWsUrl(evt.target.value)}
+              placeholder="ws://127.0.0.1:8000/stream"
+            />
+            <button className="btn btn-secondary btn-sm" onClick={onSyncWs}>
+              Sync
+            </button>
+          </div>
+          {wsDirty && (
+            <span style={{ fontSize: "var(--text-xs)", color: "var(--text-tertiary)" }}>
+              Manual override active
+            </span>
+          )}
+        </div>
       </div>
-      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      
+      <div style={{ display: "flex", gap: "var(--space-2)", marginTop: "var(--space-2)" }}>
         <button
-          style={{
-            ...buttonStyle,
-            ...(connecting || connected ? { background: "#c9c9c9", borderColor: "#c9c9c9", color: "#555555" } : {}),
-          }}
+          className={`btn ${connected || connecting ? "btn-secondary" : "btn-primary"}`}
           onClick={onConnect}
           disabled={connecting || connected}
         >
-          {connecting ? "Connecting" : connected ? "Connected" : "Connect"}
+          {connecting ? "Connecting..." : connected ? "Connected" : "Connect"}
         </button>
         <button
-          style={{
-            ...buttonStyle,
-            background: "#f5f5f5",
-            borderColor: "#111111",
-            color: "#111111",
-            opacity: !connected && !connecting ? 0.5 : 1,
-          }}
+          className="btn btn-outline"
           onClick={onDisconnect}
           disabled={!connected && !connecting}
         >
           Disconnect
         </button>
         <button
-          style={{
-            ...buttonStyle,
-            background: "#f5f5f5",
-            borderColor: "#c4c4c4",
-            color: "#111111",
-          }}
+          className="btn btn-secondary"
           onClick={onClearTrail}
         >
           Clear Trail
         </button>
       </div>
-      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-        <input
-          style={{ ...inputStyle, flex: 1, minWidth: 140 }}
-          value={logLabel}
-          onChange={(evt) => setLogLabel(evt.target.value)}
-          placeholder="Log label (optional)"
-        />
+
+      <Divider />
+
+      {/* Logging Section */}
+      <SectionHeader 
+        title="Data Logging" 
+        description="Record incoming pose data to a binary log file"
+      />
+      
+      <div style={{ display: "flex", gap: "var(--space-2)", alignItems: "flex-end" }}>
+        <div className="form-group" style={{ flex: 1 }}>
+          <label htmlFor="log-label" className="form-label">
+            Log Label (optional)
+          </label>
+          <input
+            id="log-label"
+            className="form-input"
+            value={logLabel}
+            onChange={(evt) => setLogLabel(evt.target.value)}
+            placeholder="experiment_001"
+          />
+        </div>
         <button
-          style={{
-            ...buttonStyle,
-            ...(logging ? { background: "#c9c9c9", borderColor: "#c9c9c9", color: "#555555" } : {}),
-          }}
+          className={`btn ${logging ? "btn-secondary" : "btn-primary"}`}
           onClick={() => onStartLog(logLabel || undefined)}
           disabled={logging}
+          style={{ height: 40 }}
         >
-          Start Log
+          {logging ? "Recording..." : "Start Log"}
         </button>
         <button
-          style={{
-            ...buttonStyle,
-            background: "#f5f5f5",
-            borderColor: "#111111",
-            color: "#111111",
-            opacity: !logging ? 0.5 : 1,
-          }}
+          className="btn btn-danger"
           onClick={onStopLog}
           disabled={!logging}
+          style={{ height: 40 }}
         >
-          Stop Log
+          Stop
         </button>
       </div>
-      <form onSubmit={handleReplay} style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-        <input
-          style={{ ...inputStyle, flex: 1, minWidth: 160 }}
-          value={replayFile}
-          onChange={(evt) => setReplayFile(evt.target.value)}
-          placeholder="logs/run.bin"
-        />
-        <input
-          style={{ ...inputStyle, width: 80 }}
-          value={replaySpeed}
-          onChange={(evt) => setReplaySpeed(evt.target.value)}
-          placeholder="1.0"
-        />
-        <button style={buttonStyle} type="submit" disabled={!replayFile}>
-          Replay
+
+      <Divider />
+
+      {/* Replay Section */}
+      <SectionHeader 
+        title="Log Replay" 
+        description="Replay a recorded log file through the engine"
+      />
+      
+      <form onSubmit={handleReplay} style={{ display: "flex", gap: "var(--space-2)", alignItems: "flex-end" }}>
+        <div className="form-group" style={{ flex: 1 }}>
+          <label htmlFor="replay-file" className="form-label">
+            Log File Path
+          </label>
+          <input
+            id="replay-file"
+            className="form-input"
+            value={replayFile}
+            onChange={(evt) => setReplayFile(evt.target.value)}
+            placeholder="logs/run_001.bin"
+          />
+        </div>
+        <div className="form-group" style={{ width: 100 }}>
+          <label htmlFor="replay-speed" className="form-label">
+            Speed
+          </label>
+          <input
+            id="replay-speed"
+            className="form-input"
+            value={replaySpeed}
+            onChange={(evt) => setReplaySpeed(evt.target.value)}
+            placeholder="1.0"
+          />
+        </div>
+        <button 
+          className={`btn ${replaying ? "btn-secondary" : "btn-primary"}`} 
+          type="submit" 
+          disabled={!replayFile || replaying}
+          style={{ height: 40 }}
+        >
+          {replaying ? "Playing..." : "Replay"}
         </button>
         <button
           type="button"
-          style={{
-            ...buttonStyle,
-            background: "#f5f5f5",
-            borderColor: "#111111",
-            color: "#111111",
-            opacity: !replaying ? 0.5 : 1,
-          }}
+          className="btn btn-danger"
           onClick={onStopReplay}
           disabled={!replaying}
+          style={{ height: 40 }}
         >
-          Stop Replay
+          Stop
         </button>
       </form>
     </div>

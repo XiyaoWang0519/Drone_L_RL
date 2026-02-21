@@ -6,30 +6,6 @@ interface AnchorEditorProps {
   onSave: (anchors: Anchor[]) => Promise<void>;
 }
 
-const textareaStyle: React.CSSProperties = {
-  width: "100%",
-  minHeight: 180,
-  background: "#ffffff",
-  border: "1px solid #c4c4c4",
-  borderRadius: 12,
-  color: "#111111",
-  padding: 14,
-  fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-  fontSize: 13,
-  lineHeight: 1.45,
-  resize: "vertical",
-};
-
-const buttonStyle: React.CSSProperties = {
-  borderRadius: 10,
-  border: "1px solid #111111",
-  padding: "10px 16px",
-  background: "#111111",
-  color: "#ffffff",
-  cursor: "pointer",
-  fontSize: 14,
-};
-
 export function AnchorEditor({ anchors, onSave }: AnchorEditorProps) {
   const [buffer, setBuffer] = useState(() => JSON.stringify(anchors, null, 2));
   const [error, setError] = useState<string | null>(null);
@@ -56,42 +32,65 @@ export function AnchorEditor({ anchors, onSave }: AnchorEditorProps) {
   };
 
   return (
-    <div
-      style={{
-        background: "#f7f7f7",
-        borderRadius: 16,
-        padding: 20,
-        border: "1px solid #d9d9d9",
-        display: "flex",
-        flexDirection: "column",
-        gap: 12,
-      }}
-    >
-      <div style={{ fontSize: 13, color: "#666666", letterSpacing: "0.08em", textTransform: "uppercase" }}>
-        Anchors JSON
-      </div>
-      <textarea style={textareaStyle} value={buffer} onChange={(evt) => setBuffer(evt.target.value)} spellCheck={false} />
-      {error && (
-        <div
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            fontSize: 13,
-            color: "#111111",
-            background: "#f0f0f0",
-            borderRadius: 8,
-            padding: "6px 10px",
-          }}
+    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)", height: "100%" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <h3 className="section-title" style={{ marginBottom: "var(--space-1)" }}>Anchor Configuration</h3>
+          <p style={{ fontSize: "var(--text-xs)", color: "var(--text-tertiary)" }}>
+            Define anchor positions as JSON array with id, pos (x, y, z) fields
+          </p>
+        </div>
+        <button 
+          className={`btn ${saving ? "btn-secondary" : "btn-primary"}`} 
+          onClick={handleSave} 
+          disabled={saving}
         >
+          {saving ? "Saving..." : "Push to Engine"}
+        </button>
+      </div>
+      
+      <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+        <textarea
+          className="form-input form-textarea"
+          style={{
+            width: "100%",
+            height: "100%",
+            minHeight: 140,
+            fontFamily: "var(--font-mono)",
+            fontSize: "var(--text-sm)",
+            lineHeight: 1.5,
+            resize: "none",
+            borderColor: error ? "var(--error)" : undefined,
+          }}
+          value={buffer}
+          onChange={(evt) => {
+            setBuffer(evt.target.value);
+            setError(null);
+          }}
+          spellCheck={false}
+          placeholder='[{"id": "A1", "pos": {"x": 0, "y": 0, "z": 2.5}}]'
+        />
+      </div>
+
+      {error && (
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "var(--space-2)",
+          padding: "var(--space-2) var(--space-3)",
+          background: "var(--error-light)",
+          borderRadius: "var(--radius-sm)",
+          fontSize: "var(--text-sm)",
+          color: "var(--error)",
+        }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
           {error}
         </div>
       )}
-      <div style={{ display: "flex", justifyContent: "flex-end" }}>
-        <button style={buttonStyle} onClick={handleSave} disabled={saving}>
-          {saving ? "Saving…" : "Push to Engine"}
-        </button>
-      </div>
     </div>
   );
 }

@@ -3,7 +3,27 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>TDoA Engine UI</title>
+    <meta name="theme-color" content="#ffffff" />
+    <meta name="description" content="TDoA Engine - Indoor localization monitoring and calibration console" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <title>TDoA Engine</title>
+    <style>
+      /* Prevent FOUC */
+      html { visibility: hidden; }
+      html.fonts-loaded { visibility: visible; }
+    </style>
+    <script>
+      // Mark fonts as loaded
+      document.fonts.ready.then(() => {
+        document.documentElement.classList.add('fonts-loaded');
+      });
+      // Fallback if fonts don't load
+      setTimeout(() => {
+        document.documentElement.classList.add('fonts-loaded');
+      }, 1000);
+    </script>
   </head>
   <body>
     <div id="root"></div>

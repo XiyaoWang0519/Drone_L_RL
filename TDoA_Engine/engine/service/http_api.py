@@ -7,8 +7,62 @@ import time
 from typing import Dict, Any, List, Optional, Set
 
 import numpy as np
-from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
+try:
+    from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+    from fastapi.middleware.cors import CORSMiddleware
+
+    _FASTAPI_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover
+    _FASTAPI_AVAILABLE = False
+
+    def Body(*_args, **_kwargs):
+        return None
+
+    def Query(*_args, **_kwargs):
+        return None
+
+    class HTTPException(Exception):
+        def __init__(self, status_code: int = 500, detail: str = "") -> None:
+            super().__init__(detail)
+            self.status_code = status_code
+            self.detail = detail
+
+    class WebSocket:  # pragma: no cover
+        pass
+
+    class WebSocketDisconnect(Exception):  # pragma: no cover
+        pass
+
+    class CORSMiddleware:  # pragma: no cover
+        pass
+
+    class FastAPI:  # pragma: no cover
+        def add_middleware(self, *_args, **_kwargs):
+            return None
+
+        def on_event(self, *_args, **_kwargs):
+            def decorator(fn):
+                return fn
+
+            return decorator
+
+        def get(self, *_args, **_kwargs):
+            def decorator(fn):
+                return fn
+
+            return decorator
+
+        def post(self, *_args, **_kwargs):
+            def decorator(fn):
+                return fn
+
+            return decorator
+
+        def websocket(self, *_args, **_kwargs):
+            def decorator(fn):
+                return fn
+
+            return decorator
 
 from .. import config
 from ..io_parser import parse_packet
@@ -36,13 +90,14 @@ def _resolve_path(path: str, default: Optional[str] = None) -> str:
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if _FASTAPI_AVAILABLE:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 class EngineState:

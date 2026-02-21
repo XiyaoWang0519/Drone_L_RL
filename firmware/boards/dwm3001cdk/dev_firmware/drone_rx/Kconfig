@@ -1,0 +1,19 @@
+menu "UWB drone RX options"
+
+config UWB_DRONE_RX_WAIT_MS
+    int "RX wait poll timeout (ms)"
+    default 200
+    range 10 2000
+    help
+      Timeout used to poll RX events while still servicing the console.
+
+config UWB_DRONE_IDLE_LOG_PERIOD
+    int "Idle log period (loops)"
+    default 100
+    range 10 10000
+    help
+      Print a listening message every N idle loops without frames.
+
+endmenu
+
+source "Kconfig.zephyr"

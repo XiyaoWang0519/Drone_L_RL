@@ -70,25 +70,39 @@ int dw_port_init(void)
 {
     /* Verify SPI bus is ready for communication */
     if (!device_is_ready(uwb_spi.bus)) {
+        printk("dw_port: SPI bus not ready\n");
         return -ENODEV;  /* SPI bus not available */
     }
 
     /* Verify interrupt GPIO pin is accessible */
     if (!device_is_ready(uwb_irq.port)) {
+        printk("dw_port: IRQ GPIO port not ready\n");
         return -ENODEV;  /* IRQ GPIO port not available */
     }
 
     /* Verify reset GPIO pin is accessible */
     if (!device_is_ready(uwb_reset.port)) {
+        printk("dw_port: Reset GPIO port not ready\n");
         return -ENODEV;  /* Reset GPIO port not available */
     }
 
     /* Configure reset pin as output, initially inactive (high for active-low) */
-    gpio_pin_configure_dt(&uwb_reset, GPIO_OUTPUT_INACTIVE);
+    int ret = gpio_pin_configure_dt(&uwb_reset, GPIO_OUTPUT_INACTIVE);
+    if (ret) {
+        printk("dw_port: Failed to configure reset pin (%d)\n", ret);
+        return ret;
+    }
+    printk("dw_port: Reset pin configured\n");
 
     /* Configure interrupt pin as input (DW3000 will drive this pin) */
-    gpio_pin_configure_dt(&uwb_irq, GPIO_INPUT);
+    ret = gpio_pin_configure_dt(&uwb_irq, GPIO_INPUT);
+    if (ret) {
+        printk("dw_port: Failed to configure IRQ pin (%d)\n", ret);
+        return ret;
+    }
+    printk("dw_port: IRQ pin configured\n");
 
+    printk("dw_port: init complete\n");
     return 0;  /* All hardware interfaces successfully initialized */
 }
 
@@ -111,7 +125,12 @@ void dw_port_delay_ms(uint32_t ms) {
  * The reset pin is active-low, so low = reset asserted.
  */
 void dw_port_reset_assert(void) {
-    gpio_pin_set_dt(&uwb_reset, 1);  /* Set pin high? Wait, this seems wrong... */
+    int ret = gpio_pin_set_dt(&uwb_reset, 1);
+    if (ret) {
+        printk("dw_port: Reset assert failed (%d)\n", ret);
+    } else {
+        printk("dw_port: Reset asserted\n");
+    }
 
     /* Wait, let me check the device tree configuration. In the overlay:
      * reset-gpios = <&gpio0 25 GPIO_ACTIVE_LOW>;
@@ -129,7 +148,12 @@ void dw_port_reset_assert(void) {
  * pin high, which deasserts the active-low reset.
  */
 void dw_port_reset_deassert(void) {
-    gpio_pin_set_dt(&uwb_reset, 0);  /* Release reset (physical pin goes high) */
+    int ret = gpio_pin_set_dt(&uwb_reset, 0);
+    if (ret) {
+        printk("dw_port: Reset deassert failed (%d)\n", ret);
+    } else {
+        printk("dw_port: Reset deasserted\n");
+    }
 }
 
 /**
@@ -173,4 +197,3 @@ int dw_port_spi_write_read(const uint8_t *tx, size_t txlen, uint8_t *rx, size_t 
                            tx ? &tx_set : NULL,  /* Transmit set (or NULL) */
                            rx ? &rx_set : NULL); /* Receive set (or NULL) */
 }
-

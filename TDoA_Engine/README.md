@@ -86,3 +86,9 @@ Vite serves the UI on <http://127.0.0.1:5173>. The UI connects to the engine str
 - If the UI shows "offline", confirm the engine is running and CORS headers allow your origin (default config allows `*`).
 - UDP port busy? `lsof -nP -iUDP:9000` reveals conflicting processes.
 - Restart the engine (or hit the replay stop button) to cancel an in-flight log replay.
+
+## Testing clock-sync (time) error
+
+- Quick intuition: a sync error of `Δt` seconds becomes a range-difference error of `c·Δt` meters (so `1 ns ≈ 0.30 m`).
+- Unit test (shows localization degrades when clock offsets are not compensated): `python -m unittest discover -s TDoA_Engine/engine/tests`.
+- End-to-end sim: run the stack with `example_circle.yaml`, then intentionally upload incorrect `anchor_clocks` (e.g., all zeros) in the UI and watch `residual_rms_ns` and pose error spike.

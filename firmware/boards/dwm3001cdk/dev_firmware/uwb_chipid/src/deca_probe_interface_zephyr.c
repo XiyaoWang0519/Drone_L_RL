@@ -18,10 +18,18 @@
 #include <zephyr/drivers/gpio.h>    /* GPIO driver APIs */
 #include <zephyr/irq.h>             /* Interrupt management APIs */
 #include <string.h>                 /* Memory functions: memcpy(), memset() */
+#include <stdbool.h>                /* Boolean helpers */
 
 #include "deca_device_api.h"        /* DW3000 driver APIs and types */
 #include "deca_interface.h"         /* DW3000 interface definitions */
 #include "deca_probe_interface.h"   /* Probe interface structure */
+
+#define DW3000_PORT_LOG_MUTEX 0
+#if DW3000_PORT_LOG_MUTEX
+#define DW3000_PORT_PRINTK(...) printk(__VA_ARGS__)
+#else
+#define DW3000_PORT_PRINTK(...) do { } while (0)
+#endif
 
 /**
  * @brief Device tree node reference for the DW3000 UWB device
@@ -54,6 +62,7 @@ static const struct spi_dt_spec uwb_spi = SPI_DT_SPEC_GET(UWB_NODE, SPI_WORD_SET
  * to ensure the DW3000 is awake and responsive before communication.
  */
 static const struct gpio_dt_spec uwb_reset = GPIO_DT_SPEC_GET(UWB_NODE, reset_gpios);
+static const struct gpio_dt_spec uwb_irq = GPIO_DT_SPEC_GET(UWB_NODE, irq_gpios);
 
 /* Forward declarations for functions defined in dw3000_port.c */
 void dw_port_reset_assert(void);    /* Assert DW3000 reset */
@@ -67,35 +76,98 @@ void dw_port_reset_deassert(void);  /* Deassert DW3000 reset */
  * - Sleep/delay functions for timing
  * ============================================================================ */
 
+#define DECA_IRQ_KEY_FLAG BIT(31)
+
+static K_MUTEX_DEFINE(dw_mutex);
+static k_tid_t dw_mutex_owner;
+static uint32_t dw_mutex_depth;
+static bool dw_irq_suspended;
+
+static void dw3000_irq_suspend(void)
+{
+    if (!device_is_ready(uwb_irq.port)) {
+        return;
+    }
+
+    int ret = gpio_pin_interrupt_configure_dt(&uwb_irq, GPIO_INT_DISABLE);
+    if (ret == 0) {
+        dw_irq_suspended = true;
+    } else {
+        DW3000_PORT_PRINTK("dw3000 irq suspend failed: %d\n", ret);
+    }
+}
+
+static void dw3000_irq_resume(void)
+{
+    if (!dw_irq_suspended || !device_is_ready(uwb_irq.port)) {
+        return;
+    }
+
+    int ret = gpio_pin_interrupt_configure_dt(&uwb_irq, GPIO_INT_EDGE_TO_ACTIVE);
+    if (ret == 0) {
+        dw_irq_suspended = false;
+    } else {
+        DW3000_PORT_PRINTK("dw3000 irq resume failed: %d\n", ret);
+    }
+}
+
 /**
  * @brief Acquire mutex for DW3000 driver thread safety
  *
- * The DW3000 driver uses this function to protect critical sections.
- * In Zephyr, we use interrupt locking which provides mutual exclusion
- * by disabling interrupts temporarily.
+ * The vendor driver expects this to guard SPI register sequences against
+ * pre-emption. Using a Zephyr mutex (instead of disabling interrupts) keeps
+ * the critical section serialized without tripping kernel assertions when
+ * the driver performs blocking calls.
  *
- * @return Previous interrupt state (to be restored later)
+ * @return Dummy value kept for API compatibility.
  */
 decaIrqStatus_t decamutexon(void)
 {
-    /* Disable interrupts and return the previous state.
-     * This provides mutual exclusion for the DW3000 driver operations. */
-    return (decaIrqStatus_t)irq_lock();
+    if (k_is_in_isr()) {
+        unsigned int key = irq_lock();
+        DW3000_PORT_PRINTK("decamutexon: ISR lock key=0x%x\n", key);
+        return (decaIrqStatus_t)(key | DECA_IRQ_KEY_FLAG);
+    }
+
+    k_tid_t self = k_current_get();
+    if (dw_mutex_owner == self) {
+        dw_mutex_depth++;
+        return 0;
+    }
+
+    DW3000_PORT_PRINTK("decamutexon: thread %p taking mutex\n", self);
+    k_mutex_lock(&dw_mutex, K_FOREVER);
+    DW3000_PORT_PRINTK("decamutexon: thread %p got mutex\n", self);
+    dw_mutex_owner = self;
+    dw_mutex_depth = 1;
+    dw3000_irq_suspend();
+    return 0;
 }
 
 /**
  * @brief Release mutex for DW3000 driver thread safety
  *
- * Restores the interrupt state that was saved by decamutexon().
- * This re-enables interrupts that were disabled for mutual exclusion.
- *
- * @param s The interrupt state returned by decamutexon()
+ * @param s Unused (retained for API compatibility)
  */
 void decamutexoff(decaIrqStatus_t s)
 {
-    /* Restore the previous interrupt state, re-enabling interrupts
-     * that were disabled by decamutexon(). */
-    irq_unlock((unsigned int)s);
+    if ((s & DECA_IRQ_KEY_FLAG) != 0U) {
+        unsigned int key = (unsigned int)(s & ~DECA_IRQ_KEY_FLAG);
+        DW3000_PORT_PRINTK("decamutexoff: ISR unlock key=0x%x\n", key);
+        irq_unlock(key);
+        return;
+    }
+
+    k_tid_t self = k_current_get();
+    if (dw_mutex_owner == self && dw_mutex_depth > 0U) {
+        dw_mutex_depth--;
+        if (dw_mutex_depth == 0U) {
+            dw_mutex_owner = NULL;
+            DW3000_PORT_PRINTK("decamutexoff: thread %p releasing mutex\n", self);
+            dw3000_irq_resume();
+            k_mutex_unlock(&dw_mutex);
+        }
+    }
 }
 
 /**
@@ -145,25 +217,20 @@ void deca_usleep(unsigned long time_us)
  */
 static void wakeup_device_with_io(void)
 {
-    /* Check if the reset GPIO is available and properly configured */
-    if (device_is_ready(uwb_reset.port)) {
-        /* Reset pin is available - use it to wake the device */
-
-        /* Assert reset (drive RSTn low) for 1ms */
-        dw_port_reset_assert();
-        k_msleep(1);
-
-        /* Deassert reset (drive RSTn high) to wake the device */
-        dw_port_reset_deassert();
-
-        /* Wait 2ms for the device to fully wake up and stabilize */
-        k_msleep(2);
-    } else {
-        /* Reset GPIO not available - fallback to simple delay.
-         * This might work if the device is already awake, but it's
-         * less reliable than the reset toggle method. */
-        k_msleep(2);
+    printk("wakeup_device_with_io: entry\n");
+    if (!device_is_ready(uwb_reset.port)) {
+        printk("wakeup_device_with_io: reset GPIO not ready, fallback delay\n");
+        k_busy_wait(2000);
+        printk("wakeup_device_with_io: exit (fallback)\n");
+        return;
     }
+
+    /* We already held the DW3110 in reset inside dw3110_radio_init().
+     * Toggling it again here appears to brown out the USB CDC bridge,
+     * so just provide a guard delay instead of touching the pin. */
+    printk("wakeup_device_with_io: skip reset toggle (already awake)\n");
+    k_busy_wait(2000);
+    printk("wakeup_device_with_io: exit\n");
 }
 
 /* ============================================================================
