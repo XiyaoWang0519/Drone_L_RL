@@ -8,6 +8,9 @@ dev-debug.log
 
 # Dependency directories
 node_modules/
+TDoA_Engine/ui/node_modules/
+TDoA_Engine/ui/dist/
+TDoA_Engine/ui/.vite/
 
 # Environment variables
 .env
@@ -32,6 +35,9 @@ firmware/boards/dwm3001cdk/DW3_QM33_SDK_1
 
 # Temporary files
 /tmp
+
+# Python caches
+**/__pycache__/
 
 # Python files
 *.pyc
