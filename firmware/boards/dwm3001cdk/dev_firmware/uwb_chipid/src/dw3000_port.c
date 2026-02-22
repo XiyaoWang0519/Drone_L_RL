@@ -86,8 +86,8 @@ int dw_port_init(void)
         return -ENODEV;  /* Reset GPIO port not available */
     }
 
-    /* Configure reset pin as output, initially inactive (high for active-low) */
-    int ret = gpio_pin_configure_dt(&uwb_reset, GPIO_OUTPUT_INACTIVE);
+    /* Keep reset released as high-Z input (vendor reference behavior). */
+    int ret = gpio_pin_configure_dt(&uwb_reset, GPIO_INPUT);
     if (ret) {
         printk("dw_port: Failed to configure reset pin (%d)\n", ret);
         return ret;
@@ -125,19 +125,13 @@ void dw_port_delay_ms(uint32_t ms) {
  * The reset pin is active-low, so low = reset asserted.
  */
 void dw_port_reset_assert(void) {
-    int ret = gpio_pin_set_dt(&uwb_reset, 1);
+    /* Drive reset active (physical low for GPIO_ACTIVE_LOW). */
+    int ret = gpio_pin_configure_dt(&uwb_reset, GPIO_OUTPUT_ACTIVE);
     if (ret) {
         printk("dw_port: Reset assert failed (%d)\n", ret);
-    } else {
-        printk("dw_port: Reset asserted\n");
+        return;
     }
-
-    /* Wait, let me check the device tree configuration. In the overlay:
-     * reset-gpios = <&gpio0 25 GPIO_ACTIVE_LOW>;
-     *
-     * GPIO_ACTIVE_LOW means the GPIO logic is inverted. When we call
-     * gpio_pin_set_dt(&spec, 1), it actually drives the physical pin low
-     * because of the GPIO_ACTIVE_LOW flag. So this is correct. */
+    printk("dw_port: Reset asserted\n");
 }
 
 /**
@@ -148,7 +142,8 @@ void dw_port_reset_assert(void) {
  * pin high, which deasserts the active-low reset.
  */
 void dw_port_reset_deassert(void) {
-    int ret = gpio_pin_set_dt(&uwb_reset, 0);
+    /* Release reset line to input; do not actively drive high. */
+    int ret = gpio_pin_configure_dt(&uwb_reset, GPIO_INPUT);
     if (ret) {
         printk("dw_port: Reset deassert failed (%d)\n", ret);
     } else {

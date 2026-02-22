@@ -3,10 +3,13 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/util.h>
 #include <zephyr/usb/usb_device.h>
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "deca_device_api.h"
@@ -20,8 +23,25 @@ void dw_port_reset_deassert(void);
 #define TS40_MASK   ((1ULL << 40) - 1ULL)
 #define DWT_TICK_HZ 63897600000.0
 
+#define EPOCH_MAGIC         0x01D3U
+#define EPOCH_MAX_ANCHORS   4U
+#define EPOCH_BUCKET_COUNT  8U
+#define EPOCH_PKT_HDR_LEN   17U
+#define EPOCH_PKT_ANCH_LEN  21U
+
+#define DRONE_RX_WAIT_MS      CONFIG_UWB_DRONE_RX_WAIT_MS
+#define DRONE_IDLE_LOG_PERIOD CONFIG_UWB_DRONE_IDLE_LOG_PERIOD
+#define EPOCH_TIMEOUT_MS      CONFIG_UWB_DRONE_EPOCH_TIMEOUT_MS
+#define DEFAULT_Q_NS2         ((float)CONFIG_UWB_DRONE_DEFAULT_Q_NS2_X10000 / 10000.0f)
+
 #define UWB_NODE DT_NODELABEL(dwm3001c_uwb)
 static const struct gpio_dt_spec uwb_irq = GPIO_DT_SPEC_GET(UWB_NODE, irq_gpios);
+static const uint8_t tracked_anchor_ids[EPOCH_MAX_ANCHORS] = {
+    CONFIG_UWB_DRONE_ANCHOR_ID_1,
+    CONFIG_UWB_DRONE_ANCHOR_ID_2,
+    CONFIG_UWB_DRONE_ANCHOR_ID_3,
+    CONFIG_UWB_DRONE_ANCHOR_ID_4,
+};
 
 static struct k_sem sem_rx_done;
 static struct k_sem sem_rx_to;
@@ -30,6 +50,20 @@ static struct k_sem sem_rx_err;
 static uint8_t rx_buf[128];
 static uint16_t rx_len;
 static uint64_t last_rx_ts;
+
+struct epoch_bucket {
+    bool used;
+    uint16_t seq;
+    uint32_t first_seen_ms;
+    uint32_t last_seen_ms;
+    uint8_t present_mask;
+    uint64_t rx_ts[EPOCH_MAX_ANCHORS];
+};
+
+struct epoch_anchor_sample {
+    uint8_t id;
+    uint64_t t_rx_ticks;
+};
 
 static inline uint64_t ts5_to_u64(const uint8_t ts[5])
 {
@@ -64,6 +98,290 @@ static double ticks_to_ns(double ticks)
     return ticks * 1e9 / DWT_TICK_HZ;
 }
 
+static uint32_t now_ms(void)
+{
+    return k_uptime_get_32();
+}
+
+static uint8_t mask_count(uint8_t mask)
+{
+    uint8_t count = 0;
+
+    for (uint8_t i = 0; i < EPOCH_MAX_ANCHORS; ++i) {
+        if (mask & (uint8_t)BIT(i)) {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+static int anchor_slot_for_id(uint8_t anchor_id)
+{
+    for (int i = 0; i < (int)EPOCH_MAX_ANCHORS; ++i) {
+        if (tracked_anchor_ids[i] == anchor_id) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static void epoch_bucket_init(struct epoch_bucket *bucket, uint16_t seq, uint32_t timestamp_ms)
+{
+    memset(bucket, 0, sizeof(*bucket));
+    bucket->used = true;
+    bucket->seq = seq;
+    bucket->first_seen_ms = timestamp_ms;
+    bucket->last_seen_ms = timestamp_ms;
+}
+
+static void epoch_bucket_clear(struct epoch_bucket *bucket)
+{
+    memset(bucket, 0, sizeof(*bucket));
+}
+
+static void put_le_float(uint8_t *dst, float value)
+{
+    uint32_t raw = 0;
+    memcpy(&raw, &value, sizeof(raw));
+    sys_put_le32(raw, dst);
+}
+
+static void put_le_double(uint8_t *dst, double value)
+{
+    uint64_t raw = 0;
+    memcpy(&raw, &value, sizeof(raw));
+    sys_put_le64(raw, dst);
+}
+
+static bool build_epoch_packet(const struct epoch_bucket *bucket, uint8_t *out_buf,
+                               size_t out_buf_len, size_t *out_len)
+{
+    struct epoch_anchor_sample anc[EPOCH_MAX_ANCHORS];
+    uint8_t n_anc = 0;
+
+    for (uint8_t slot = 0; slot < EPOCH_MAX_ANCHORS; ++slot) {
+        if (!(bucket->present_mask & (uint8_t)BIT(slot))) {
+            continue;
+        }
+
+        anc[n_anc].id = tracked_anchor_ids[slot];
+        anc[n_anc].t_rx_ticks = bucket->rx_ts[slot];
+        n_anc++;
+    }
+
+    if (n_anc == 0) {
+        return false;
+    }
+
+    for (uint8_t i = 0; i < n_anc; ++i) {
+        for (uint8_t j = i + 1; j < n_anc; ++j) {
+            if (anc[j].id < anc[i].id) {
+                struct epoch_anchor_sample tmp = anc[i];
+                anc[i] = anc[j];
+                anc[j] = tmp;
+            }
+        }
+    }
+
+    const size_t needed = EPOCH_PKT_HDR_LEN + ((size_t)n_anc * EPOCH_PKT_ANCH_LEN);
+    if (out_buf_len < needed) {
+        return false;
+    }
+
+    size_t off = 0;
+    sys_put_le16(EPOCH_MAGIC, &out_buf[off]);
+    off += 2;
+    sys_put_le16((uint16_t)(needed - 4U), &out_buf[off]);
+    off += 2;
+    sys_put_le32((uint32_t)bucket->seq, &out_buf[off]);
+    off += 4;
+    put_le_double(&out_buf[off], (double)k_uptime_get() / 1000.0);
+    off += 8;
+    out_buf[off++] = n_anc;
+
+    for (uint8_t i = 0; i < n_anc; ++i) {
+        out_buf[off++] = anc[i].id;
+        sys_put_le64(anc[i].t_rx_ticks, &out_buf[off]);
+        off += 8;
+        put_le_float(&out_buf[off], DEFAULT_Q_NS2);
+        off += 4;
+        put_le_float(&out_buf[off], 0.0f); /* cir_snr_db */
+        off += 4;
+        put_le_float(&out_buf[off], 0.0f); /* nlos_score */
+        off += 4;
+    }
+
+    *out_len = off;
+    return true;
+}
+
+static void emit_epoch_text(const struct epoch_bucket *bucket, bool timed_out)
+{
+#if CONFIG_UWB_DRONE_EMIT_EPOCH_LOG
+    printk("DRONE: EPOCH seq=%u n=%u/4 timeout=%u mask=0x%02x A1=%llu A2=%llu A3=%llu A4=%llu\n",
+           bucket->seq,
+           mask_count(bucket->present_mask),
+           timed_out ? 1U : 0U,
+           bucket->present_mask,
+           (unsigned long long)bucket->rx_ts[0],
+           (unsigned long long)bucket->rx_ts[1],
+           (unsigned long long)bucket->rx_ts[2],
+           (unsigned long long)bucket->rx_ts[3]);
+#else
+    ARG_UNUSED(bucket);
+    ARG_UNUSED(timed_out);
+#endif
+}
+
+static void emit_bin_hex(const uint8_t *buf, size_t len)
+{
+#if CONFIG_UWB_DRONE_EMIT_BIN_HEX
+    printk("BIN:");
+    for (size_t i = 0; i < len; ++i) {
+        printk("%02X", buf[i]);
+    }
+    printk("\n");
+#else
+    ARG_UNUSED(buf);
+    ARG_UNUSED(len);
+#endif
+}
+
+static void emit_epoch_payload(const struct epoch_bucket *bucket, bool timed_out,
+                               uint32_t *epoch_emitted, uint32_t *epoch_full,
+                               uint32_t *epoch_partial)
+{
+    uint8_t present = mask_count(bucket->present_mask);
+    if (present == 0U) {
+        return;
+    }
+
+    emit_epoch_text(bucket, timed_out);
+
+#if CONFIG_UWB_DRONE_EMIT_BIN_HEX
+    uint8_t packet[EPOCH_PKT_HDR_LEN + (EPOCH_MAX_ANCHORS * EPOCH_PKT_ANCH_LEN)];
+    size_t packet_len = 0;
+    if (build_epoch_packet(bucket, packet, sizeof(packet), &packet_len)) {
+        emit_bin_hex(packet, packet_len);
+    } else {
+        printk("DRONE: EPOCH packet build error seq=%u mask=0x%02x\n",
+               bucket->seq, bucket->present_mask);
+    }
+#endif
+
+    (*epoch_emitted)++;
+    if (present >= EPOCH_MAX_ANCHORS) {
+        (*epoch_full)++;
+    } else {
+        (*epoch_partial)++;
+    }
+}
+
+static void flush_bucket(struct epoch_bucket *buckets, int index, bool timed_out,
+                         uint32_t *epoch_emitted, uint32_t *epoch_full,
+                         uint32_t *epoch_partial)
+{
+    emit_epoch_payload(&buckets[index], timed_out, epoch_emitted, epoch_full, epoch_partial);
+    epoch_bucket_clear(&buckets[index]);
+}
+
+static int find_bucket_for_seq(struct epoch_bucket *buckets, uint16_t seq)
+{
+    for (int i = 0; i < EPOCH_BUCKET_COUNT; ++i) {
+        if (buckets[i].used && buckets[i].seq == seq) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static int alloc_bucket_for_seq(struct epoch_bucket *buckets, uint16_t seq, uint32_t timestamp_ms,
+                                uint32_t *epoch_emitted, uint32_t *epoch_full,
+                                uint32_t *epoch_partial)
+{
+    for (int i = 0; i < EPOCH_BUCKET_COUNT; ++i) {
+        if (!buckets[i].used) {
+            epoch_bucket_init(&buckets[i], seq, timestamp_ms);
+            return i;
+        }
+    }
+
+    int oldest_idx = 0;
+    uint32_t oldest_age = 0;
+    bool have_oldest = false;
+    for (int i = 0; i < EPOCH_BUCKET_COUNT; ++i) {
+        uint32_t age = timestamp_ms - buckets[i].last_seen_ms;
+        if (!have_oldest || age > oldest_age) {
+            oldest_age = age;
+            oldest_idx = i;
+            have_oldest = true;
+        }
+    }
+
+    flush_bucket(buckets, oldest_idx, true, epoch_emitted, epoch_full, epoch_partial);
+    epoch_bucket_init(&buckets[oldest_idx], seq, timestamp_ms);
+    return oldest_idx;
+}
+
+static void flush_timed_out_buckets(struct epoch_bucket *buckets, uint32_t timestamp_ms,
+                                    uint32_t *epoch_emitted, uint32_t *epoch_full,
+                                    uint32_t *epoch_partial)
+{
+    for (int i = 0; i < EPOCH_BUCKET_COUNT; ++i) {
+        if (!buckets[i].used) {
+            continue;
+        }
+        if ((timestamp_ms - buckets[i].last_seen_ms) >= (uint32_t)EPOCH_TIMEOUT_MS) {
+            flush_bucket(buckets, i, true, epoch_emitted, epoch_full, epoch_partial);
+        }
+    }
+}
+
+static void flush_all_buckets(struct epoch_bucket *buckets, uint32_t *epoch_emitted,
+                              uint32_t *epoch_full, uint32_t *epoch_partial)
+{
+    for (int i = 0; i < EPOCH_BUCKET_COUNT; ++i) {
+        if (!buckets[i].used) {
+            continue;
+        }
+        flush_bucket(buckets, i, true, epoch_emitted, epoch_full, epoch_partial);
+    }
+}
+
+static void process_blink_epoch(struct epoch_bucket *buckets, const struct uwb_blink_frame *frame,
+                                uint64_t rx_ts, uint32_t timestamp_ms,
+                                uint32_t *epoch_emitted, uint32_t *epoch_full,
+                                uint32_t *epoch_partial, uint32_t *epoch_dup)
+{
+    int slot = anchor_slot_for_id(frame->beacon_id);
+    if (slot < 0) {
+        return;
+    }
+
+    int bucket_idx = find_bucket_for_seq(buckets, frame->superframe_seq);
+    if (bucket_idx < 0) {
+        bucket_idx = alloc_bucket_for_seq(buckets, frame->superframe_seq, timestamp_ms,
+                                          epoch_emitted, epoch_full, epoch_partial);
+    }
+
+    struct epoch_bucket *bucket = &buckets[bucket_idx];
+    const uint8_t bit = (uint8_t)BIT(slot);
+    if (bucket->present_mask & bit) {
+        (*epoch_dup)++;
+    }
+
+    bucket->present_mask |= bit;
+    bucket->rx_ts[slot] = rx_ts;
+    bucket->last_seen_ms = timestamp_ms;
+
+    if (mask_count(bucket->present_mask) >= EPOCH_MAX_ANCHORS) {
+        flush_bucket(buckets, bucket_idx, false, epoch_emitted, epoch_full, epoch_partial);
+    }
+}
+
 static const struct device *cdc_dev;
 static volatile bool running = true;
 
@@ -95,6 +413,7 @@ static void usb_ready_wait(void)
         return;
     }
 
+    printk("DRONE: USB CDC ready, waiting for DTR...\n");
     uint32_t dtr = 0;
     while (true) {
         (void)uart_line_ctrl_get(cdc_dev, UART_LINE_CTRL_DTR, &dtr);
@@ -103,6 +422,7 @@ static void usb_ready_wait(void)
         }
         k_msleep(50);
     }
+    printk("DRONE: DTR asserted\n");
     k_msleep(50);
 }
 
@@ -185,20 +505,37 @@ static void on_rx_err(const dwt_cb_data_t *cb)
 
 static int dw3110_radio_init(void)
 {
+    uint32_t wait_us = 0U;
+
     dw_port_reset_assert();
     k_msleep(2);
     dw_port_reset_deassert();
     k_msleep(5);
 
+    printk("DRONE: calling dwt_probe()\n");
     if (dwt_probe((struct dwt_probe_s *)&dw3000_probe_interf) < 0) {
+        printk("DRONE: dwt_probe() failed\n");
         return -EIO;
     }
+    printk("DRONE: dwt_probe() ok\n");
+
+    printk("DRONE: waiting for IDLE_RC...\n");
     while (!dwt_checkidlerc()) {
         k_busy_wait(50);
+        wait_us += 50U;
+        if (wait_us >= 200000U) {
+            printk("DRONE: IDLE_RC timeout after %u us\n", wait_us);
+            return -EIO;
+        }
     }
+    printk("DRONE: IDLE_RC reached in %u us\n", wait_us);
+
+    printk("DRONE: calling dwt_initialise()\n");
     if (dwt_initialise(DWT_READ_OTP_ALL) != DWT_SUCCESS) {
+        printk("DRONE: dwt_initialise() failed\n");
         return -EIO;
     }
+    printk("DRONE: dwt_initialise() ok\n");
 
     dwt_config_t cfg = {
         .chan = 9,
@@ -233,6 +570,7 @@ static int dw3110_radio_init(void)
     cbs.cbRxErr = on_rx_err;
     dwt_setcallbacks(&cbs);
     atomic_set(&uwb_ready, 1);
+    dwt_isr();
 
     return 0;
 }
@@ -287,6 +625,11 @@ void main(void)
     bool t2_have_prev = false;
     uint64_t t2_prev_raw = 0;
     int64_t t2_acc = 0;
+    struct epoch_bucket epoch_buckets[EPOCH_BUCKET_COUNT] = {0};
+    uint32_t epoch_full = 0;
+    uint32_t epoch_partial = 0;
+    uint32_t epoch_dup = 0;
+    uint32_t epoch_emitted = 0;
 
     while (1) {
         poll_console_keys();
@@ -295,6 +638,7 @@ void main(void)
                 dwt_forcetrxoff();
                 rx_active = false;
             }
+            flush_all_buckets(epoch_buckets, &epoch_emitted, &epoch_full, &epoch_partial);
             k_msleep(50);
             continue;
         }
@@ -308,7 +652,7 @@ void main(void)
             rx_active = true;
         }
 
-        if (k_sem_take(&sem_rx_done, K_MSEC(CONFIG_UWB_DRONE_RX_WAIT_MS)) == 0) {
+        if (k_sem_take(&sem_rx_done, K_MSEC(DRONE_RX_WAIT_MS)) == 0) {
             rx_active = false;
             rx_idle = 0;
 
@@ -323,6 +667,9 @@ void main(void)
                            frame.flags,
                            (unsigned long long)last_rx_ts,
                            rx_ok);
+                    process_blink_epoch(epoch_buckets, &frame, last_rx_ts, now_ms(),
+                                        &epoch_emitted, &epoch_full,
+                                        &epoch_partial, &epoch_dup);
                 } else {
                     rx_err++;
                     printk("DRONE: BLINK parse error len=%u ts=%llu err=%u\n",
@@ -381,27 +728,23 @@ void main(void)
                        (unsigned long long)last_rx_ts,
                        rx_err);
             }
-            continue;
-        }
-
-        if (k_sem_take(&sem_rx_err, K_NO_WAIT) == 0) {
+        } else if (k_sem_take(&sem_rx_err, K_NO_WAIT) == 0) {
             rx_active = false;
             rx_err++;
             printk("DRONE: RX error err=%u\n", rx_err);
-            continue;
-        }
-
-        if (k_sem_take(&sem_rx_to, K_NO_WAIT) == 0) {
+        } else if (k_sem_take(&sem_rx_to, K_NO_WAIT) == 0) {
             rx_active = false;
             rx_err++;
             printk("DRONE: RX timeout err=%u\n", rx_err);
-            continue;
+        } else {
+            rx_idle++;
+            if (rx_idle >= DRONE_IDLE_LOG_PERIOD) {
+                printk("DRONE: listening ok=%u err=%u epoch=%u full=%u partial=%u dup=%u\n",
+                       rx_ok, rx_err, epoch_emitted, epoch_full, epoch_partial, epoch_dup);
+                rx_idle = 0;
+            }
         }
 
-        rx_idle++;
-        if (rx_idle >= CONFIG_UWB_DRONE_IDLE_LOG_PERIOD) {
-            printk("DRONE: listening ok=%u err=%u\n", rx_ok, rx_err);
-            rx_idle = 0;
-        }
+        flush_timed_out_buckets(epoch_buckets, now_ms(), &epoch_emitted, &epoch_full, &epoch_partial);
     }
 }

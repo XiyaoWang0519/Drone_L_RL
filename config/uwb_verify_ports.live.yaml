@@ -1,0 +1,12 @@
+anchors:
+  - name: master_a1
+    role: master
+    port: /dev/cu.usbmodem1101
+    baud: 115200
+    expected_anchor_id: 1
+
+  - name: slave_a2
+    role: slave
+    port: /dev/cu.usbmodem101
+    baud: 115200
+    expected_anchor_id: 2
