@@ -14,6 +14,62 @@ config UWB_DRONE_IDLE_LOG_PERIOD
     help
       Print a listening message every N idle loops without frames.
 
+config UWB_DRONE_EPOCH_TIMEOUT_MS
+    int "Epoch flush timeout (ms)"
+    default 30
+    range 1 1000
+    help
+      Flush a partial superframe epoch if no new matching BLINK arrives
+      for this duration.
+
+config UWB_DRONE_EMIT_EPOCH_LOG
+    bool "Emit consolidated DRONE: EPOCH text logs"
+    default y
+    help
+      Print one consolidated line per emitted epoch.
+
+config UWB_DRONE_EMIT_BIN_HEX
+    bool "Emit BIN:<HEX> payload for each epoch"
+    default y
+    help
+      Print parser-compatible epoch packets as uppercase hex lines.
+
+config UWB_DRONE_ANCHOR_ID_1
+    int "Tracked anchor ID for slot A1"
+    default 1
+    range 1 255
+    help
+      Anchor ID mapped to A1 in the epoch mask and text summary.
+
+config UWB_DRONE_ANCHOR_ID_2
+    int "Tracked anchor ID for slot A2"
+    default 2
+    range 1 255
+    help
+      Anchor ID mapped to A2 in the epoch mask and text summary.
+
+config UWB_DRONE_ANCHOR_ID_3
+    int "Tracked anchor ID for slot A3"
+    default 3
+    range 1 255
+    help
+      Anchor ID mapped to A3 in the epoch mask and text summary.
+
+config UWB_DRONE_ANCHOR_ID_4
+    int "Tracked anchor ID for slot A4"
+    default 4
+    range 1 255
+    help
+      Anchor ID mapped to A4 in the epoch mask and text summary.
+
+config UWB_DRONE_DEFAULT_Q_NS2_X10000
+    int "Default q_ns2 scaled by 10000"
+    default 225
+    range 1 1000000
+    help
+      Default quality variance used in binary epoch output.
+      Actual q_ns2 = value / 10000.0 (default 0.0225 ns^2).
+
 endmenu
 
 source "Kconfig.zephyr"

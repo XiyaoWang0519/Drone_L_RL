@@ -1,51 +1,118 @@
 # Drone_L_RL
 
-Indoor UWB localization + RL-driven obstacle avoidance on a sub-250 g quadrotor. Firmware targets Nordic/DWM3001CDK (DW3000 UWB) with Zephyr RTOS; planning and design notes live under `docs/`.
+Indoor UWB localization and drone-control research workspace combining:
+- Zephyr firmware for DWM3001CDK/nRF52833 anchors and tag-side experiments
+- A Python TDoA engine (REST + WebSocket)
+- A React UI and simulator loop for offline/bench development
 
-## Project Structure
-- `firmware/`: Embedded code and board assets
-  - `boards/dwm3001cdk/dev_firmware/`: Board samples (LED, USB, UWB, TWR)
-  - `src/`, `include/`, `tests/`: Placeholders for shared modules
-- `docs/`: Design notes, plans, vendor PDFs
-- `config/`: Environment-specific configs
-- `.env.example`: Template for local configuration
+## What Lives Here
 
-## Prerequisites
-- Zephyr SDK installed and `west` available
-- Python 3.10+
-- SEGGER J-Link tools for flashing (macOS supported)
+- `firmware/`: Zephyr firmware apps and board-specific assets for DWM3001CDK
+- `TDoA_Engine/`: Localization engine, simulator tooling, and UI
+- `docs/`: Plans, reports, verification workflow docs, and vendor references
+- `config/`: Host-side YAML configuration templates (ports/thresholds)
+- `scripts/`: Setup, flashing, verification capture, and cleanup scripts
 
-See `firmware/boards/dwm3001cdk/dev_firmware/led_bringup/README.md` for full Zephyr setup if you’re new to Zephyr.
+## Quick Start
 
-## Quick Start (LED Bring-up)
-- Initialize environment once: `export WEST_PYTHON=$(which python)`
-- Build: `west build -b nrf52833dk/nrf52833 firmware/boards/dwm3001cdk/dev_firmware/led_bringup -d build/led_bringup -p always -- -DPython3_EXECUTABLE="$WEST_PYTHON"`
-- Flash via J-Link: `west flash -r jlink -d build/led_bringup`
+### 1. Zephyr environment (macOS)
 
-## Local Environment
-- Copy and edit: `cp .env.example .env`
-- Adjust ports, flags, and paths for your setup
+```bash
+scripts/setup_zephyr_macos.sh
+source scripts/activate_zephyr_env.sh
+```
 
-## Coding Style
-- C/CMake (Zephyr): 4-space indent, 100-char line limit, K&R braces
-- Filenames `snake_case.c/.h`; macros `UPPER_SNAKE_CASE`; functions `lower_snake_case`
-- App layout: `CMakeLists.txt`, `prj.conf`, optional `app.overlay`, sources in `src/`
-- DeviceTree overlays: keep minimal, comment pin mappings (see LED sample `app.overlay`)
+### 2. Firmware bring-up (LED sample)
+
+```bash
+west build -b nrf52833dk/nrf52833 \
+  firmware/boards/dwm3001cdk/dev_firmware/led_bringup \
+  -d build/led_bringup -p always \
+  -- -DPython3_EXECUTABLE="$WEST_PYTHON"
+
+west flash -r jlink -d build/led_bringup
+```
+
+### 3. Engine + simulator + UI loop
+
+```bash
+# terminal 1
+uvicorn TDoA_Engine.engine.service.http_api:app --host 127.0.0.1 --port 8000
+
+# terminal 2
+python TDoA_Engine/tools/sim/sim_uwb.py --cfg TDoA_Engine/tools/sim/example_circle.yaml
+
+# terminal 3
+cd TDoA_Engine/ui && npm run dev
+```
+
+## Core Workflows
+
+### Firmware app build pattern
+
+```bash
+west build -b nrf52833dk/nrf52833 <app_path> -d <build_dir> -p always \
+  -- -DPython3_EXECUTABLE="$WEST_PYTHON"
+west flash -r jlink -d <build_dir>
+```
+
+### UWB verification capture + analysis
+
+```bash
+python scripts/uwb_verify_capture.py \
+  --ports-config config/uwb_verify_ports.yaml \
+  --duration-s 300 \
+  --label r1_sync
+
+python scripts/uwb_verify_analyze.py sync \
+  --run-dir logs/uwb_verify/<timestamp>_r1_sync \
+  --thresholds config/uwb_verify_thresholds.yaml
+```
+
+See `docs/uwb_verification_workflow.md` for full details and caveats.
 
 ## Testing
-- Prefer small Zephyr sample apps under `firmware/boards/.../dev_firmware/`
-- Place unit/HLT scaffolding in `firmware/tests/`
-- If adding Zephyr tests, integrate with Twister (`west twister`) in a follow-up PR
 
-## Commits & PRs
-- Conventional Commits (e.g., `feat:`, `docs:`, `chore:`); subject ≤ 72 chars
-- PRs: summary, affected paths, logs/clip of test/flash, hardware assumptions (board, pins, runners)
+- Engine unit tests:
 
-## Security & Config
-- Never commit secrets; `.env` is ignored
-- Large vendor SDK blobs are ignored via `.gitignore`
-- Prefer reproducible scripts and document exact commands used
+```bash
+python -m unittest discover TDoA_Engine/engine/tests
+```
 
-## Links
-- Design plan: `docs/indoor_drone_final_project_plan.md`
-- Firmware overview: `firmware/README.md`
+- UI build/type-check:
+
+```bash
+cd TDoA_Engine/ui && npm run build
+```
+
+- Firmware validation is sample-driven (build + flash + serial logs); Twister can be introduced for structured firmware suites.
+
+## Documentation Map
+
+- Project docs index: `docs/README.md`
+- Firmware area guide: `firmware/README.md`
+- Firmware sample catalog: `firmware/boards/dwm3001cdk/dev_firmware/README.md`
+- Engine/sim/UI guide: `TDoA_Engine/README.md`
+- Engine internals: `TDoA_Engine/engine/README.md`
+- Host config reference: `config/README.md`
+- Script reference: `scripts/README.md`
+
+## Cleanup
+
+- Quick cleanup of generated local artifacts:
+
+```bash
+scripts/clean_project.sh
+```
+
+- Deeper cleanup (also removes `build/`, root `logs/`, `tmp/`, UI `node_modules`):
+
+```bash
+scripts/clean_project.sh --deep
+```
+
+## Security and Local State
+
+- Copy `.env.example` to `.env` for local overrides.
+- Do not commit secrets, serial-port machine mappings, or private logs.
+- Treat `TDoA_Engine/engine/logs/`, root `logs/`, `build/`, and `tmp/` as local artifacts unless explicitly requested otherwise.
