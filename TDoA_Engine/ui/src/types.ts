@@ -16,9 +16,18 @@ export interface AnchorClock {
   valid?: boolean;
 }
 
+export interface RadioSchedule {
+  tick_hz: number;
+  superframe_uus: number;
+  slot_start_uus: number;
+  slot_uus: number;
+  master_beacon_id?: number;
+}
+
 export interface AnchorResponse {
   anchors: Anchor[];
   anchor_clocks: AnchorClock[];
+  radio_schedule?: RadioSchedule;
 }
 
 export interface EngineStatusPayload {
@@ -52,6 +61,9 @@ export interface HealthResponse {
   status: string;
   anchors: string[];
   clock: Record<string, AnchorClock>;
+  radio_schedule?: RadioSchedule;
+  source_mode?: string;
+  ingest?: Record<string, unknown>;
   logging: boolean;
   replay_running: boolean;
   stats?: Record<string, unknown>;

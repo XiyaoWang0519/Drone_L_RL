@@ -1,4 +1,4 @@
-import type { Anchor, AnchorClock, AnchorResponse, HealthResponse } from "./types";
+import type { Anchor, AnchorClock, AnchorResponse, HealthResponse, RadioSchedule } from "./types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -27,8 +27,15 @@ export async function fetchAnchors(baseUrl: string): Promise<AnchorResponse> {
   return request<AnchorResponse>(join(baseUrl, "/anchors"));
 }
 
-export async function setAnchors(baseUrl: string, anchors: Anchor[], clocks: AnchorClock[] = []) {
-  const payload = { anchors, anchor_clocks: clocks };
+export async function setAnchors(
+  baseUrl: string,
+  anchors: Anchor[],
+  clocks: AnchorClock[] = [],
+  radioSchedule?: RadioSchedule
+) {
+  const payload = radioSchedule
+    ? { anchors, anchor_clocks: clocks, radio_schedule: radioSchedule }
+    : { anchors, anchor_clocks: clocks };
   return request(join(baseUrl, "/set_anchors"), {
     method: "POST",
     body: JSON.stringify(payload),
