@@ -1,0 +1,15 @@
+sync:
+  min_duration_s: 300
+  max_sync_err_rms_ns: 2.0
+  max_sync_err_jitter_ns: 1.0
+  max_rx_error_rate_hz: 0.2
+  max_consecutive_missed_sync: 3
+  alignment_window_ms: 8
+  schedule_alignment_ratio_min: 0.6
+
+static:
+  min_duration_s: 300
+  warmup_s: 10
+  max_3d_rms_cm: 10
+  max_xy_rms_cm: 8
+  max_p95_cm: 15

@@ -1,0 +1,19 @@
+# Copy to config/uwb_verify_ports.yaml and update serial ports for your machine.
+anchors:
+  - name: master_a1
+    role: master
+    port: /dev/cu.usbmodem2101
+    baud: 115200
+    expected_anchor_id: 1
+
+  - name: slave_a2
+    role: slave
+    port: /dev/cu.usbmodem2201
+    baud: 115200
+    expected_anchor_id: 2
+
+  - name: slave_a3
+    role: slave
+    port: /dev/cu.usbmodem2301
+    baud: 115200
+    expected_anchor_id: 3

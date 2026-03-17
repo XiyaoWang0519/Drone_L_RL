@@ -1,0 +1,101 @@
+menu "UWB beacon options"
+
+choice UWB_ANCHOR_ROLE
+    prompt "Anchor role"
+    default ROLE_MASTER_ANCHOR
+    help
+      Select whether this anchor transmits SYNC frames (master) or aligns
+      to a master SYNC (slave).
+
+config ROLE_MASTER_ANCHOR
+    bool "Master anchor"
+    help
+      Transmit SYNC frames at the superframe boundary.
+
+config ROLE_SLAVE_ANCHOR
+    bool "Slave anchor"
+    help
+      Listen for SYNC frames and schedule BLINKs using the estimated mapping.
+
+endchoice
+
+config UWB_BEACON_ID
+    int "Beacon ID"
+    default 1
+    range 1 255
+    help
+      Unique ID encoded in the blink frame.
+
+config UWB_BEACON_SLOT_ID
+    int "TDMA slot ID"
+    default 0
+    range 0 63
+    help
+      Slot index for this beacon within the superframe.
+
+config UWB_BEACON_FLAGS
+    int "Blink flags byte"
+    default 0
+    range 0 255
+    help
+      Optional flags inserted into the blink frame.
+
+config UWB_SUPERFRAME_UUS
+    int "Superframe duration (UUS)"
+    default 50000
+    range 1000 200000
+    help
+      Superframe period in UWB microseconds (approximately microseconds).
+
+config UWB_SLOT_START_UUS
+    int "Slot start offset from SYNC (UUS)"
+    default 10000
+    range 0 50000
+    help
+      Delay from the SYNC superframe boundary to slot 0.
+
+config UWB_SLOT_UUS
+    int "Slot duration (UUS)"
+    default 2000
+    range 200 20000
+    help
+      Slot duration in UWB microseconds.
+
+config UWB_TX_GUARD_UUS
+    int "Minimum delay before scheduled TX (UUS)"
+    default 1000
+    range 100 10000
+    help
+      Minimum time between now and the scheduled TX to avoid a late error.
+
+config UWB_TX_START_DELAY_UUS
+    int "Startup delay before first TX (UUS)"
+    default 2000
+    range 100 20000
+    help
+      Delay from boot to the first scheduled transmission.
+
+config UWB_TX_TIMEOUT_MS
+    int "TX done timeout (ms)"
+    default 100
+    range 10 1000
+    help
+      Host timeout waiting for the TX done interrupt.
+
+config UWB_SLAVE_RX_WAIT_MS
+    int "Slave RX wait timeout (ms)"
+    default 100
+    range 10 1000
+    help
+      Timeout for waiting on SYNC RX while polling the console.
+
+config UWB_SLAVE_IDLE_LOG_PERIOD
+    int "Slave idle log period (loops)"
+    default 200
+    range 1 10000
+    help
+      Loop count between idle status logs on the slave.
+
+endmenu
+
+source "Kconfig.zephyr"

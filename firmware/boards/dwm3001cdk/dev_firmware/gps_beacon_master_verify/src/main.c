@@ -38,9 +38,25 @@ void dw_port_reset_deassert(void);
 #define SLAVE_RX_WINDOW_IMMEDIATE_FALLBACK CONFIG_UWB_SLAVE_RX_WINDOW_IMMEDIATE_FALLBACK
 #define SLAVE_RX_WINDOW_LATE_MARGIN_UUS 2000U
 
+#ifdef CONFIG_UWB_VERIFY_VERBOSE_TEXT
+#define VERIFY_VERBOSE_TEXT 1
+#else
+#define VERIFY_VERBOSE_TEXT 0
+#endif
+
 #define BEACON_ID             CONFIG_UWB_BEACON_ID
 #define BEACON_SLOT_ID        CONFIG_UWB_BEACON_SLOT_ID
 #define BEACON_FLAGS          CONFIG_UWB_BEACON_FLAGS
+
+#define MASTER_SUMMARY_PERIOD 200U
+
+#if defined(CONFIG_ROLE_MASTER_ANCHOR)
+#define ROLE_NAME "master"
+#elif defined(CONFIG_ROLE_SLAVE_ANCHOR)
+#define ROLE_NAME "slave"
+#else
+#define ROLE_NAME "unknown"
+#endif
 
 #define UWB_NODE DT_NODELABEL(dwm3001c_uwb)
 static const struct gpio_dt_spec uwb_irq = GPIO_DT_SPEC_GET(UWB_NODE, irq_gpios);
@@ -59,6 +75,23 @@ static atomic_t rx_term_latched;
 static atomic_t rx_term_drop_count;
 static volatile uint32_t rx_term_status;
 #endif
+
+static inline int64_t ver_uptime_ms(void)
+{
+    return k_uptime_get();
+}
+
+#define VER_LOG(fmt, ...) \
+    printk("VER ts_ms=%lld role=%s anchor_id=%u slot_id=%u " fmt "\n", \
+           (long long)ver_uptime_ms(), ROLE_NAME, \
+           (unsigned int)BEACON_ID, (unsigned int)BEACON_SLOT_ID, ##__VA_ARGS__)
+
+#define VERIFY_PRINT(fmt, ...)                 \
+    do {                                       \
+        if (VERIFY_VERBOSE_TEXT) {             \
+            printk(fmt, ##__VA_ARGS__);        \
+        }                                      \
+    } while (0)
 
 static inline uint64_t ts5_to_u64(const uint8_t ts[5])
 {
@@ -85,12 +118,14 @@ static uint64_t get_rx_timestamp_u64(void)
 static int64_t unwrap_ts40(uint64_t raw, uint64_t *prev_raw, bool *have_prev, int64_t *acc)
 {
     uint64_t masked = raw & TS40_MASK;
+
     if (!*have_prev) {
         *have_prev = true;
         *prev_raw = masked;
         *acc = (int64_t)masked;
         return *acc;
     }
+
     uint64_t dt = (masked - *prev_raw) & TS40_MASK;
     *acc += (int64_t)dt;
     *prev_raw = masked;
@@ -139,17 +174,20 @@ static void poll_console_keys(void)
         if (uart_poll_in(cdc_dev, &c) != 0) {
             break;
         }
+
         if (c == 's' || c == 'S') {
             if (!running) {
                 running = true;
                 running_auto_paused = false;
                 printk("[console] start\n");
+                VER_LOG("event=RUN_STATE running=1");
             }
         } else if (c == 'p' || c == 'P') {
             if (running) {
                 running = false;
                 running_auto_paused = false;
                 printk("[console] pause\n");
+                VER_LOG("event=RUN_STATE running=0");
             }
         }
     }
@@ -210,6 +248,7 @@ static void uwb_irq_handler(const struct device *dev, struct gpio_callback *cb, 
     ARG_UNUSED(dev);
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
+
     if (atomic_get(&uwb_ready)) {
         k_sem_give(&uwb_isr_sem);
     }
@@ -220,14 +259,17 @@ static int irq_setup(void)
     if (!device_is_ready(uwb_irq.port)) {
         return -ENODEV;
     }
+
     int ret = gpio_pin_configure_dt(&uwb_irq, GPIO_INPUT);
     if (ret) {
         return ret;
     }
+
     ret = gpio_pin_interrupt_configure_dt(&uwb_irq, GPIO_INT_EDGE_TO_ACTIVE);
     if (ret) {
         return ret;
     }
+
     gpio_init_callback(&irq_cb, uwb_irq_handler, BIT(uwb_irq.pin));
     gpio_add_callback(uwb_irq.port, &irq_cb);
     return 0;
@@ -267,6 +309,7 @@ static void on_rx_ok(const dwt_cb_data_t *cb)
     if (rx_len > sizeof(rx_buf)) {
         rx_len = sizeof(rx_buf);
     }
+
     dwt_readrxdata(rx_buf, rx_len, 0);
     last_rx_ts = get_rx_timestamp_u64();
     k_sem_give(&sem_rx_done);
@@ -301,9 +344,11 @@ static int dw3110_radio_init(void)
     if (dwt_probe((struct dwt_probe_s *)&dw3000_probe_interf) < 0) {
         return -EIO;
     }
+
     while (!dwt_checkidlerc()) {
         k_busy_wait(50);
     }
+
     if (dwt_initialise(DWT_READ_OTP_ALL) != DWT_SUCCESS) {
         return -EIO;
     }
@@ -513,15 +558,18 @@ static uint32_t guard_tx_time(uint32_t target_dtu, uint32_t now_dtu,
 
 static bool start_delayed_tx(const uint8_t *tx_buf, size_t len, uint32_t dx_time,
                              const char *tag, uint16_t seq,
-                             uint32_t *tx_ok, uint32_t *tx_late, uint32_t *tx_timeout,
+                             uint32_t *tx_ok, uint32_t *tx_late,
+                             uint32_t *tx_timeout,
                              uint8_t tx_mode, uint32_t rx_after_tx_delay_uus,
                              uint32_t rx_after_tx_timeout_uus)
 {
     if (dwt_writetxdata(len, tx_buf, 0) != DWT_SUCCESS) {
         printk("%s: TX data write failed (seq=%u)\n", tag, seq);
+        VER_LOG("event=TX_WRITE_FAIL tag=%s seq=%u", tag, (unsigned int)seq);
         dwt_forcetrxoff();
         return false;
     }
+
     dwt_writetxfctrl(len + FCS_LEN, 0, 1);
 
     k_sem_reset(&sem_tx_done);
@@ -539,6 +587,8 @@ static bool start_delayed_tx(const uint8_t *tx_buf, size_t len, uint32_t dx_time
     if (tx_ret == DWT_ERROR) {
         (*tx_late)++;
         printk("%s: TX late (seq=%u late=%u)\n", tag, seq, *tx_late);
+        VER_LOG("event=TX_LATE tag=%s seq=%u tx_late=%u",
+                tag, (unsigned int)seq, (unsigned int)(*tx_late));
         dwt_forcetrxoff();
         return false;
     }
@@ -550,8 +600,9 @@ static bool start_delayed_tx(const uint8_t *tx_buf, size_t len, uint32_t dx_time
             dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
         } else {
             (*tx_timeout)++;
-            printk("%s: TX timeout (seq=%u timeout=%u)\n",
-                   tag, seq, *tx_timeout);
+            printk("%s: TX timeout (seq=%u timeout=%u)\n", tag, seq, *tx_timeout);
+            VER_LOG("event=TX_TIMEOUT tag=%s seq=%u tx_timeout=%u",
+                    tag, (unsigned int)seq, (unsigned int)(*tx_timeout));
             dwt_forcetrxoff();
             return false;
         }
@@ -566,7 +617,8 @@ void main(void)
     k_msleep(200);
     usb_ready_wait();
     k_msleep(200);
-    printk("\n[DWM3001CDK] UWB beacon starting\n");
+
+    printk("\n[DWM3001CDK] UWB beacon verify firmware starting\n");
     printk("Press 's' to start, 'p' to pause\n");
 
     k_sem_init(&sem_tx_done, 0, 1);
@@ -577,6 +629,7 @@ void main(void)
 #endif
     k_sem_init(&uwb_isr_sem, 0, 1);
     atomic_clear(&uwb_ready);
+
     k_thread_create(&uwb_isr_thread, uwb_isr_stack, UWB_ISR_STACK_SIZE,
                     uwb_isr_thread_fn, NULL, NULL, NULL,
                     UWB_ISR_PRIORITY, 0, K_NO_WAIT);
@@ -601,6 +654,12 @@ void main(void)
 #else
 #error "Select ROLE_MASTER_ANCHOR or ROLE_SLAVE_ANCHOR"
 #endif
+
+    VER_LOG("event=BOOT superframe_uus=%u slot_start_uus=%u slot_uus=%u tx_guard_uus=%u",
+            (unsigned int)SUPERFRAME_UUS,
+            (unsigned int)SLOT_START_UUS,
+            (unsigned int)SLOT_UUS,
+            (unsigned int)TX_GUARD_UUS);
 
 #if defined(CONFIG_ROLE_SLAVE_ANCHOR)
     dwt_setrxtimeout(0);
@@ -648,21 +707,31 @@ void main(void)
     uint32_t rx_err = 0;
     uint32_t rx_non_sync = 0;
     uint32_t rx_idle = 0;
+    uint32_t rx_timeout_cnt = 0;
     uint32_t tx_ok = 0;
     uint32_t tx_late = 0;
     uint32_t tx_timeout = 0;
+
+    bool t1_have_prev = false;
+    bool t2_have_prev = false;
+    uint64_t t1_prev_raw = 0;
+    uint64_t t2_prev_raw = 0;
+    int64_t t1_acc = 0;
+    int64_t t2_acc = 0;
+
+    bool have_pair = false;
     bool sync_est_valid = false;
     double sync_a = 1.0;
     double sync_b = 0.0;
-    bool have_pair = false;
     int64_t prev_t1_u = 0;
     int64_t prev_t2_u = 0;
-    bool t1_have_prev = false;
-    uint64_t t1_prev_raw = 0;
-    int64_t t1_acc = 0;
-    bool t2_have_prev = false;
-    uint64_t t2_prev_raw = 0;
-    int64_t t2_acc = 0;
+
+    bool have_sync_seq = false;
+    uint16_t last_sync_seq = 0;
+    uint16_t expected_seq = 0;
+    uint32_t missed_total = 0;
+    uint32_t missed_consecutive = 0;
+    uint32_t missed_consecutive_max = 0;
     uint32_t rx_window_miss_streak = 0;
     uint32_t rx_err_rxphe = 0;
     uint32_t rx_err_rxfce = 0;
@@ -690,6 +759,7 @@ void main(void)
             running = true;
             running_auto_paused = false;
             printk("[console] start (auto)\n");
+            VER_LOG("event=RUN_STATE running=1 mode=auto");
         }
 
         poll_console_keys();
@@ -710,6 +780,7 @@ void main(void)
             next_sync_dtu = now + start_delay_dtu;
             scheduled = true;
         }
+
         next_sync_dtu = guard_tx_time(next_sync_dtu, now, tx_guard_dtu, 0);
         uint32_t sync_dx_time = quantize_delayed_time(next_sync_dtu);
         uint64_t t1_master = ((uint64_t)sync_dx_time) << 8;
@@ -730,13 +801,22 @@ void main(void)
             scheduled = false;
             continue;
         }
-        printk("SYNC: id=%u seq=%u t1_master=%llu tx_ts=%llu ok=%u late=%u\n",
-               BEACON_ID,
-               superframe_seq,
-               (unsigned long long)t1_master,
-               (unsigned long long)last_tx_ts,
-               tx_ok,
-               tx_late);
+
+        VERIFY_PRINT("SYNC: id=%u seq=%u t1_master=%llu tx_ts=%llu ok=%u late=%u\n",
+                     BEACON_ID,
+                     superframe_seq,
+                     (unsigned long long)t1_master,
+                     (unsigned long long)last_tx_ts,
+                     tx_ok,
+                     tx_late);
+
+        VER_LOG("event=SYNC_TX seq=%u t1_master=%llu tx_ts=%llu tx_ok=%u tx_late=%u tx_timeout=%u",
+                (unsigned int)superframe_seq,
+                (unsigned long long)t1_master,
+                (unsigned long long)last_tx_ts,
+                (unsigned int)tx_ok,
+                (unsigned int)tx_late,
+                (unsigned int)tx_timeout);
 
         uint64_t sync_tx_ts = last_tx_ts;
 #if ENABLE_BLINK_TX
@@ -745,6 +825,7 @@ void main(void)
         blink_target_dtu = guard_tx_time(blink_target_dtu, now, tx_guard_dtu,
                                          slot_offset_dtu);
         uint32_t blink_dx_time = quantize_delayed_time(blink_target_dtu);
+
         struct uwb_blink_frame frame = {
             .frame_type = UWB_FRAME_TYPE_BLINK,
             .beacon_id = BEACON_ID,
@@ -762,17 +843,36 @@ void main(void)
             scheduled = false;
             continue;
         }
-        printk("BLINK: id=%u seq=%u slot=%u tx_ts=%llu ok=%u late=%u\n",
-               BEACON_ID,
-               superframe_seq,
-               BEACON_SLOT_ID,
-               (unsigned long long)last_tx_ts,
-               tx_ok,
-               tx_late);
+
+        VERIFY_PRINT("BLINK: id=%u seq=%u slot=%u tx_ts=%llu ok=%u late=%u\n",
+                     BEACON_ID,
+                     superframe_seq,
+                     BEACON_SLOT_ID,
+                     (unsigned long long)last_tx_ts,
+                     tx_ok,
+                     tx_late);
+
+        VER_LOG("event=BLINK_TX seq=%u tx_ts=%llu tx_ok=%u tx_late=%u tx_timeout=%u",
+                (unsigned int)superframe_seq,
+                (unsigned long long)last_tx_ts,
+                (unsigned int)tx_ok,
+                (unsigned int)tx_late,
+                (unsigned int)tx_timeout);
+#else
+        VER_LOG("event=BLINK_SKIP seq=%u reason=disabled",
+                (unsigned int)superframe_seq);
 #endif
 
         superframe_seq++;
         next_sync_dtu = (uint32_t)(sync_tx_ts >> 8) + superframe_dtu;
+
+        if ((superframe_seq % MASTER_SUMMARY_PERIOD) == 0U) {
+            VER_LOG("event=SUMMARY seq=%u tx_ok=%u tx_late=%u tx_timeout=%u",
+                    (unsigned int)superframe_seq,
+                    (unsigned int)tx_ok,
+                    (unsigned int)tx_late,
+                    (unsigned int)tx_timeout);
+        }
 #else
         if (!rx_active) {
             bool window_expired = false;
@@ -827,15 +927,74 @@ void main(void)
             if (uwb_sync_unpack(rx_buf, rx_len, &sync)) {
                 rx_ok++;
                 uint64_t t2_slave = last_rx_ts;
-                printk("SLAVE: SYNC rx master=%u seq=%u t1=%llu t2=%llu ok=%u\n",
-                       sync.master_id,
-                       sync.sync_seq,
-                       (unsigned long long)sync.t1_master,
-                       (unsigned long long)t2_slave,
-                       rx_ok);
+                VERIFY_PRINT("SLAVE: SYNC rx master=%u seq=%u t1=%llu t2=%llu ok=%u\n",
+                             sync.master_id,
+                             sync.sync_seq,
+                             (unsigned long long)sync.t1_master,
+                             (unsigned long long)t2_slave,
+                             rx_ok);
 
-                int64_t t1_u = unwrap_ts40(sync.t1_master, &t1_prev_raw, &t1_have_prev, &t1_acc);
-                int64_t t2_u = unwrap_ts40(t2_slave, &t2_prev_raw, &t2_have_prev, &t2_acc);
+                VER_LOG("event=SYNC_RX seq=%u master_id=%u t1_master=%llu t2_slave=%llu rx_ok=%u",
+                        (unsigned int)sync.sync_seq,
+                        (unsigned int)sync.master_id,
+                        (unsigned long long)sync.t1_master,
+                        (unsigned long long)t2_slave,
+                        (unsigned int)rx_ok);
+
+                if (!have_sync_seq) {
+                    have_sync_seq = true;
+                    last_sync_seq = sync.sync_seq;
+                    expected_seq = (uint16_t)(sync.sync_seq + 1U);
+                    missed_consecutive = 0;
+                } else {
+                    uint16_t delta = (uint16_t)(sync.sync_seq - last_sync_seq);
+                    if (delta == 0U) {
+                        VER_LOG("event=SYNC_DUP seq=%u expected_seq=%u last_sync_seq=%u",
+                                (unsigned int)sync.sync_seq,
+                                (unsigned int)expected_seq,
+                                (unsigned int)last_sync_seq);
+                    } else {
+                        if (delta > 1U) {
+                            uint32_t missed = (uint32_t)delta - 1U;
+                            uint16_t from_seq = (uint16_t)(last_sync_seq + 1U);
+                            uint16_t to_seq = (uint16_t)(sync.sync_seq - 1U);
+
+                            missed_total += missed;
+                            missed_consecutive += missed;
+                            if (missed_consecutive > missed_consecutive_max) {
+                                missed_consecutive_max = missed_consecutive;
+                            }
+
+                            VER_LOG("event=MISSED_SYNC from_seq=%u to_seq=%u missed_count=%u missed_total=%u max_consecutive_missed=%u",
+                                    (unsigned int)from_seq,
+                                    (unsigned int)to_seq,
+                                    (unsigned int)missed,
+                                    (unsigned int)missed_total,
+                                    (unsigned int)missed_consecutive_max);
+                        } else {
+                            missed_consecutive = 0;
+                        }
+
+                        last_sync_seq = sync.sync_seq;
+                        expected_seq = (uint16_t)(sync.sync_seq + 1U);
+                    }
+                }
+
+                int64_t t1_u = unwrap_ts40(sync.t1_master, &t1_prev_raw,
+                                           &t1_have_prev, &t1_acc);
+                int64_t t2_u = unwrap_ts40(t2_slave, &t2_prev_raw,
+                                           &t2_have_prev, &t2_acc);
+
+                if (sync_est_valid) {
+                    double pred_t2 = sync_a * (double)t1_u + sync_b;
+                    double err_ticks = (double)t2_u - pred_t2;
+                    double err_ns = ticks_to_ns(err_ticks);
+                    VERIFY_PRINT("SLAVE: SYNC_ERR seq=%u err_ns=%.2f\n",
+                                 sync.sync_seq, err_ns);
+                    VER_LOG("event=SYNC_ERR seq=%u err_ns=%.2f",
+                            (unsigned int)sync.sync_seq,
+                            err_ns);
+                }
 
                 if (have_pair) {
                     int64_t dt1 = t1_u - prev_t1_u;
@@ -844,6 +1003,9 @@ void main(void)
                         sync_a = (double)dt2 / (double)dt1;
                         sync_b = (double)t2_u - sync_a * (double)t1_u;
                         sync_est_valid = true;
+                        VERIFY_PRINT("SLAVE: EST drift_ppm=%.3f\n",
+                                     (sync_a - 1.0) * 1e6);
+                        VER_LOG("event=EST drift_ppm=%.3f", (sync_a - 1.0) * 1e6);
                     }
                 }
 
@@ -873,11 +1035,13 @@ void main(void)
 
 #if ENABLE_BLINK_TX
                 uint64_t blink_master_ticks = (uint64_t)t1_u + slot_offset_ticks;
-                uint64_t blink_slave_ticks = (uint64_t)(sync_a * (double)blink_master_ticks + sync_b);
+                uint64_t blink_slave_ticks =
+                    (uint64_t)(sync_a * (double)blink_master_ticks + sync_b);
                 uint8_t blink_tx_mode = DWT_START_TX_DELAYED;
                 uint32_t blink_rx_after_tx_delay_uus = 0U;
                 uint32_t blink_rx_after_tx_timeout_uus = 0U;
                 bool blink_rx_auto_armed = false;
+
                 uint32_t blink_target_dtu = (uint32_t)(blink_slave_ticks >> 8);
                 uint32_t now = get_sys_time_u32();
                 blink_target_dtu = guard_tx_time(blink_target_dtu, now, tx_guard_dtu,
@@ -926,13 +1090,35 @@ void main(void)
                     rx_active = true;
                     rx_window_active = true;
                 }
+
+                VERIFY_PRINT("SLAVE: BLINK sched t_slave=%llu tx_ts=%llu ok=%u late=%u\n",
+                             (unsigned long long)blink_slave_ticks,
+                             (unsigned long long)last_tx_ts,
+                             tx_ok,
+                             tx_late);
+
+                VER_LOG("event=BLINK_TX seq=%u t_slave=%llu tx_ts=%llu tx_ok=%u tx_late=%u tx_timeout=%u",
+                        (unsigned int)sync.sync_seq,
+                        (unsigned long long)blink_slave_ticks,
+                        (unsigned long long)last_tx_ts,
+                        (unsigned int)tx_ok,
+                        (unsigned int)tx_late,
+                        (unsigned int)tx_timeout);
+#else
+                VER_LOG("event=BLINK_SKIP seq=%u reason=disabled",
+                        (unsigned int)sync.sync_seq);
 #endif
             } else {
                 rx_non_sync++;
-                printk("SLAVE: RX non-sync len=%u ts=%llu non_sync=%u\n",
-                       rx_len,
-                       (unsigned long long)last_rx_ts,
-                       rx_non_sync);
+                VERIFY_PRINT("SLAVE: RX non-sync len=%u ts=%llu non_sync=%u\n",
+                             rx_len,
+                             (unsigned long long)last_rx_ts,
+                             rx_non_sync);
+
+                VER_LOG("event=RX_NON_SYNC len=%u ts=%llu rx_non_sync=%u",
+                        (unsigned int)rx_len,
+                        (unsigned long long)last_rx_ts,
+                        (unsigned int)rx_non_sync);
             }
             continue;
         }
@@ -1013,8 +1199,23 @@ void main(void)
             }
             if (count_rx_error) {
                 rx_err++;
-                printk("SLAVE: RX error err=%u status=0x%08x advance=%u\n",
-                       rx_err, rx_status, window_advanced ? 1U : 0U);
+                VERIFY_PRINT("SLAVE: RX error err=%u advance=%u\n",
+                             rx_err, window_advanced ? 1U : 0U);
+                VER_LOG("event=RX_ERROR expected_seq=%u rx_err=%u rx_timeout=%u last_sync_seq=%u status=0x%08x advance=%u",
+                        (unsigned int)expected_seq,
+                        (unsigned int)rx_err,
+                        (unsigned int)rx_timeout_cnt,
+                        (unsigned int)(have_sync_seq ? last_sync_seq : 0U),
+                        (unsigned int)rx_status,
+                        window_advanced ? 1U : 0U);
+            } else {
+                VER_LOG("event=RX_RETRY expected_seq=%u rx_retry=%u rx_err=%u rx_timeout=%u last_sync_seq=%u status=0x%08x",
+                        (unsigned int)expected_seq,
+                        (unsigned int)rx_err_transient_retry,
+                        (unsigned int)rx_err,
+                        (unsigned int)rx_timeout_cnt,
+                        (unsigned int)(have_sync_seq ? last_sync_seq : 0U),
+                        (unsigned int)rx_status);
             }
             continue;
         }
@@ -1045,6 +1246,7 @@ void main(void)
             drain_opposite_rx_error_sem(true);
 
             rx_err++;
+            rx_timeout_cnt++;
             if (rx_status & DWT_INT_RXFTO_BIT_MASK) {
                 rx_to_rxfto++;
             }
@@ -1057,7 +1259,14 @@ void main(void)
             if ((rx_status & SYS_STATUS_ALL_RX_TO) == 0U) {
                 rx_to_other++;
             }
-            printk("SLAVE: RX timeout err=%u status=0x%08x\n", rx_err, rx_status);
+            VERIFY_PRINT("SLAVE: RX timeout err=%u\n", rx_err);
+
+            VER_LOG("event=RX_TIMEOUT expected_seq=%u rx_err=%u rx_timeout=%u last_sync_seq=%u status=0x%08x",
+                    (unsigned int)expected_seq,
+                    (unsigned int)rx_err,
+                    (unsigned int)rx_timeout_cnt,
+                    (unsigned int)(have_sync_seq ? last_sync_seq : 0U),
+                    (unsigned int)rx_status);
             continue;
         }
 
@@ -1067,15 +1276,40 @@ void main(void)
 
         rx_idle++;
         if (rx_idle >= SLAVE_IDLE_LOG_PERIOD) {
-            printk("SLAVE: listening ok=%u err=%u non_sync=%u drop=%u "
-                   "err_adv=%u exp_adv=%u retry=%u "
-                   "err_bits[phe=%u fce=%u fsl=%u sto=%u arfe=%u cia=%u cperr=%u other=%u] "
-                   "to_bits[fto=%u pto=%u cperr=%u other=%u]\n",
-                   rx_ok, rx_err, rx_non_sync, (uint32_t)atomic_get(&rx_term_drop_count),
-                   rx_err_window_advance, rx_window_expired_advance, rx_err_transient_retry,
-                   rx_err_rxphe, rx_err_rxfce, rx_err_rxfsl, rx_err_rxsto,
-                   rx_err_arfe, rx_err_ciaerr, rx_err_cperr, rx_err_other,
-                   rx_to_rxfto, rx_to_rxpto, rx_to_cperr, rx_to_other);
+            VERIFY_PRINT("SLAVE: listening ok=%u err=%u non_sync=%u\n",
+                         rx_ok, rx_err, rx_non_sync);
+
+            VER_LOG("event=SUMMARY rx_ok=%u rx_err=%u rx_timeout=%u tx_ok=%u tx_late=%u tx_timeout=%u missed_total=%u max_consecutive_missed=%u expected_seq=%u",
+                    (unsigned int)rx_ok,
+                    (unsigned int)rx_err,
+                    (unsigned int)rx_timeout_cnt,
+                    (unsigned int)tx_ok,
+                    (unsigned int)tx_late,
+                    (unsigned int)tx_timeout,
+                    (unsigned int)missed_total,
+                    (unsigned int)missed_consecutive_max,
+                    (unsigned int)expected_seq);
+            VER_LOG("event=RX_REASON_SUMMARY dup_drop=%u err_advanced=%u expired_advanced=%u "
+                    "transient_retry=%u "
+                    "err_rxphe=%u err_rxfce=%u err_rxfsl=%u err_rxsto=%u "
+                    "err_arfe=%u err_ciaerr=%u err_cperr=%u err_other=%u "
+                    "to_rxfto=%u to_rxpto=%u to_cperr=%u to_other=%u",
+                    (unsigned int)atomic_get(&rx_term_drop_count),
+                    (unsigned int)rx_err_window_advance,
+                    (unsigned int)rx_window_expired_advance,
+                    (unsigned int)rx_err_transient_retry,
+                    (unsigned int)rx_err_rxphe,
+                    (unsigned int)rx_err_rxfce,
+                    (unsigned int)rx_err_rxfsl,
+                    (unsigned int)rx_err_rxsto,
+                    (unsigned int)rx_err_arfe,
+                    (unsigned int)rx_err_ciaerr,
+                    (unsigned int)rx_err_cperr,
+                    (unsigned int)rx_err_other,
+                    (unsigned int)rx_to_rxfto,
+                    (unsigned int)rx_to_rxpto,
+                    (unsigned int)rx_to_cperr,
+                    (unsigned int)rx_to_other);
             rx_idle = 0;
         }
 #endif
