@@ -506,6 +506,7 @@ async def drone_serial_ingest_task() -> None:
             with serial.Serial(port, baudrate=baudrate, timeout=timeout_s) as ser:
                 STATE.ingest_status["serial"]["connected"] = True
                 STATE.ingest_status["serial"]["last_error"] = None
+                STATE.serial_assembler.reset()
                 while STATE.running:
                     raw = await asyncio.to_thread(ser.readline)
                     if not raw:

@@ -242,6 +242,19 @@ class TestDroneSerialAssembler(unittest.TestCase):
         self.assertEqual(len(outputs), 1)
         self.assertEqual(outputs[0]["tag_tx_seq"], 0)
 
+    def test_reset_clears_stale_sync_state(self):
+        self.assembler.ingest_line("DRONE: SYNC master=1 seq=200 t1=1000 ts=1100 ok=1")
+        self.assembler.ingest_line("DRONE: SYNC master=1 seq=5 t1=1200 ts=1300 ok=2")
+        self.assertEqual(self.assembler.snapshot()["out_of_order_lines"], 1)
+
+        self.assembler.reset()
+
+        self.assembler.ingest_line("DRONE: SYNC master=1 seq=5 t1=1200 ts=1300 ok=3")
+        snapshot = self.assembler.snapshot()
+        self.assertEqual(snapshot["out_of_order_lines"], 0)
+        self.assertEqual(snapshot["last_superframe_seq"], 5)
+
+
 
 class TestLogFormats(unittest.TestCase):
     def test_iter_logged_epochs_reads_normalized_records(self):
