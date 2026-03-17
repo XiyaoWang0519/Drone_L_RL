@@ -263,14 +263,7 @@ static void on_rx_ok(const dwt_cb_data_t *cb)
     if (!rx_term_capture(status)) {
         return;
     }
-    uint32_t status = cb ? cb->status : 0U;
-    if (!rx_term_capture(status)) {
-        return;
-    }
-    if (!cb) {
-        k_sem_give(&sem_rx_done);
-        return;
-    }
+    rx_len = cb->datalength;
     rx_len = cb->datalength;
     if (rx_len > sizeof(rx_buf)) {
         rx_len = sizeof(rx_buf);
