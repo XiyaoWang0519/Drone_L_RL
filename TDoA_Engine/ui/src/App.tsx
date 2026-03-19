@@ -19,7 +19,7 @@ import {
   stopReplay,
   fetchHealth,
 } from "./api";
-import type { Anchor, AnchorClock } from "./types";
+import type { Anchor, AnchorClock, RadioSchedule } from "./types";
 
 interface ToastState {
   text: string;
@@ -38,6 +38,7 @@ export default function App() {
   const [wsUrl, setWsUrl] = useState<string>(ENGINE_WS_URL);
   const [anchors, setAnchors] = useState<Anchor[]>([]);
   const [anchorClocks, setAnchorClocks] = useState<AnchorClock[]>([]);
+  const [radioSchedule, setRadioSchedule] = useState<RadioSchedule | undefined>(undefined);
   const [logging, setLogging] = useState(false);
   const [replaying, setReplaying] = useState(false);
   const [loadingAnchors, setLoadingAnchors] = useState(false);
@@ -77,6 +78,7 @@ export default function App() {
               valid: Boolean((info as any).valid ?? true),
             }))) as AnchorClock[];
       setAnchorClocks(clockArray);
+      setRadioSchedule(anchorInfo.radio_schedule ?? health.radio_schedule);
       setLogging(Boolean(health.logging));
       setReplaying(Boolean(health.replay_running));
     } catch (err) {
@@ -109,7 +111,7 @@ export default function App() {
   const handlePushAnchors = useCallback(
     async (nextAnchors: Anchor[]) => {
       try {
-        await pushAnchors(engineHttpUrl, nextAnchors, anchorClocks);
+        await pushAnchors(engineHttpUrl, nextAnchors, anchorClocks, radioSchedule);
         setAnchors(nextAnchors);
         showToast("Anchors updated");
         clearTrail();
@@ -117,13 +119,13 @@ export default function App() {
         showToast(err instanceof Error ? `Failed to set anchors: ${err.message}` : String(err), "error");
       }
     },
-    [anchorClocks, clearTrail, engineHttpUrl, showToast]
+    [anchorClocks, clearTrail, engineHttpUrl, radioSchedule, showToast]
   );
 
   const handlePushClocks = useCallback(
     async (nextClocks: AnchorClock[]) => {
       try {
-        await pushAnchors(engineHttpUrl, anchors, nextClocks);
+        await pushAnchors(engineHttpUrl, anchors, nextClocks, radioSchedule);
         setAnchorClocks(nextClocks);
         showToast("Clock parameters updated");
         clearTrail();
@@ -131,7 +133,7 @@ export default function App() {
         showToast(err instanceof Error ? `Failed to set clocks: ${err.message}` : String(err), "error");
       }
     },
-    [anchors, clearTrail, engineHttpUrl, showToast]
+    [anchors, clearTrail, engineHttpUrl, radioSchedule, showToast]
   );
 
   const handleStartLog = useCallback(

@@ -1,11 +1,13 @@
 import csv
 import datetime as _dt
 import os
-import struct
 from typing import Any, Dict, Optional
 
+from ..ingest import serialize_epoch_record
+
+
 class LogManager:
-    """Manage raw epoch and pose logging for the engine."""
+    """Manage normalized epoch and pose logging for the engine."""
 
     def __init__(self, root: str = "engine/logs") -> None:
         self.root = root
@@ -47,12 +49,11 @@ class LogManager:
         self._base_path = base_name
         return {"raw_path": raw_path, "pose_path": pose_path, "base": base_name}
 
-    def log(self, raw: bytes, pose: Dict[str, Any]) -> None:
+    def log(self, epoch: Dict[str, Any], pose: Optional[Dict[str, Any]] = None) -> None:
         if not self.active or self._raw_fp is None:
             return
-        self._raw_fp.write(struct.pack("<I", len(raw)))
-        self._raw_fp.write(raw)
-        if self._pose_writer is not None:
+        self._raw_fp.write(serialize_epoch_record(epoch))
+        if pose is not None and self._pose_writer is not None:
             pos = pose.get("pose", {})
             vel = pose.get("vel", {})
             status = pose.get("status", {})

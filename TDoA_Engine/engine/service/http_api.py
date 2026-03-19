@@ -2,11 +2,11 @@ import asyncio
 import json
 import math
 import os
-import struct
 import time
-from typing import Dict, Any, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
+
 try:
     from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
@@ -64,16 +64,29 @@ except ModuleNotFoundError:  # pragma: no cover
 
             return decorator
 
+try:  # pragma: no cover - optional dependency in tests
+    import serial
+except ModuleNotFoundError:  # pragma: no cover
+    serial = None
+
 from .. import config
-from ..io_parser import parse_packet
-from ..solver.tdoa import solve_tdoa
+from ..ingest import (
+    DEFAULT_Q_NS2,
+    DRONE_CLOCK_MODE,
+    OBS_KIND_TOA,
+    apply_radio_schedule_defaults,
+    default_radio_schedule,
+    iter_logged_epochs,
+    parse_packet,
+    DroneSerialEpochAssembler,
+)
 from ..solver.ekf import CVEKF
+from ..solver.tdoa import solve_tdoa
 from .log_manager import LogManager
 from .ws_stream import BroadcastManager
 
 C_AIR = 299_702_547.0
-DW3XXX_TICK_HZ = 63_897_600_000.0  # ~15.65 ps timestamp resolution on DW3110
-DEFAULT_Q_NS2 = 0.15 ** 2
+DW3XXX_TICK_HZ = 63_897_600_000.0
 GATING_SIGMA = 3.0
 
 BASE_PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -111,9 +124,27 @@ class EngineState:
         self.tick_hz = getattr(config, "TICK_HZ", DW3XXX_TICK_HZ)
         self.stats: Dict[str, Any] = {}
         self.clock_params: Dict[str, Dict[str, float]] = {}
+        self.radio_schedule: Dict[str, Any] = default_radio_schedule()
+        self.source_mode = getattr(config, "INGEST_MODE", "legacy_udp")
+        self.serial_assembler = DroneSerialEpochAssembler(radio_schedule=self.radio_schedule)
         self.log_manager = LogManager(root=_resolve_path(getattr(config, "LOG_ROOT", "engine/logs"), DEFAULT_LOG_ROOT))
         self.replay_task: Optional[asyncio.Task] = None
         self.replay_lock = asyncio.Lock()
+        self.ingest_status: Dict[str, Any] = {
+            "source_mode": self.source_mode,
+            "udp": {
+                "host": getattr(config, "UDP_HOST", "127.0.0.1"),
+                "port": int(getattr(config, "UDP_PORT", 9000)),
+                "listening": False,
+                "last_error": None,
+            },
+            "serial": {
+                "port": getattr(config, "SERIAL_PORT", ""),
+                "baudrate": int(getattr(config, "SERIAL_BAUDRATE", 115200)),
+                "connected": False,
+                "last_error": None,
+            },
+        }
 
     def anchors_array(self, ids: List[str]) -> np.ndarray:
         arr = []
@@ -142,19 +173,16 @@ class EngineState:
             return 2
         span_z = float(np.max(coords[:, 2]) - np.min(coords[:, 2]))
         if span_z > 0.05:
-            # Treat anchors with >5 cm vertical spread as observably 3D
             return 3
         return 2
 
     def update_dimension_from_anchors(self) -> None:
-        dim = self.infer_dimension()
-        self.set_dim(dim)
+        self.set_dim(self.infer_dimension())
 
     def convert_anchor_time(self, anchor_id: str, ticks: float, tick_hz: float) -> float:
-        """Return host-reference time for an anchor RX measurement."""
         t_sec = float(ticks) / float(tick_hz)
         params = self.clock_params.get(anchor_id)
-        if params:
+        if params and bool(params.get("valid", True)):
             offset = params.get("offset_ns", 0.0) * 1e-9
             drift = params.get("drift_ppm", 0.0) * 1e-6
             denom = 1.0 + drift
@@ -174,8 +202,29 @@ class EngineState:
                 "drift_ppm": float(entry.get("drift_ppm", 0.0)),
                 "valid": bool(entry.get("valid", True)),
             }
-        if clocks:
-            self.clock_params = clocks
+        self.clock_params = clocks
+
+    def update_radio_schedule(self, payload: Optional[Dict[str, Any]]) -> None:
+        self.radio_schedule = apply_radio_schedule_defaults(payload)
+        self.tick_hz = float(self.radio_schedule.get("tick_hz", self.tick_hz))
+        self.serial_assembler.update_schedule(self.radio_schedule)
+        self.serial_assembler.reset()
+
+    def set_source_mode(self, mode: Optional[str]) -> None:
+        candidate = (mode or "legacy_udp").strip().lower()
+        if candidate not in {"legacy_udp", "drone_serial"}:
+            candidate = "legacy_udp"
+        self.source_mode = candidate
+        self.ingest_status["source_mode"] = candidate
+
+    def health_ingest_snapshot(self) -> Dict[str, Any]:
+        serial_status = dict(self.ingest_status.get("serial", {}))
+        serial_status["sync"] = self.serial_assembler.snapshot()
+        return {
+            "source_mode": self.source_mode,
+            "udp": dict(self.ingest_status.get("udp", {})),
+            "serial": serial_status,
+        }
 
 
 STATE = EngineState()
@@ -188,23 +237,25 @@ def load_calibration() -> None:
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             anchors = {}
-            for a in data.get("anchors", []):
-                pos = np.array([
-                    float(a["pos"]["x"]),
-                    float(a["pos"]["y"]),
-                    float(a["pos"].get("z", 0.0)),
-                ])
-                anchors[a["id"]] = pos
+            for anchor in data.get("anchors", []):
+                pos = np.array(
+                    [
+                        float(anchor["pos"]["x"]),
+                        float(anchor["pos"]["y"]),
+                        float(anchor["pos"].get("z", 0.0)),
+                    ]
+                )
+                anchors[anchor["id"]] = pos
             if anchors:
                 STATE.anchors = anchors
                 STATE.update_dimension_from_anchors()
             clocks = data.get("anchor_clocks") or data.get("clocks")
             if isinstance(clocks, list):
                 STATE.update_clock_params(clocks)
+            STATE.update_radio_schedule(data.get("radio_schedule"))
             return
         except Exception:
             pass
-    # default square layout if no calibration
     STATE.anchors = {
         "A1": np.array([0.0, 0.0, 2.40]),
         "A2": np.array([8.0, 0.0, 2.65]),
@@ -212,6 +263,7 @@ def load_calibration() -> None:
         "A4": np.array([0.0, 6.0, 2.55]),
     }
     STATE.clock_params = {}
+    STATE.update_radio_schedule(None)
     STATE.update_dimension_from_anchors()
 
 
@@ -221,6 +273,7 @@ def save_calibration(payload: Dict[str, Any]) -> None:
     snapshot = {
         "anchors": payload.get("anchors", []),
         "anchor_clocks": payload.get("anchor_clocks", []),
+        "radio_schedule": apply_radio_schedule_defaults(payload.get("radio_schedule")),
         "frame": payload.get("frame"),
         "map_id": payload.get("map_id"),
         "updated_at": time.time(),
@@ -245,21 +298,25 @@ def _quality_weight(entry: Dict[str, Any]) -> float:
 def compute_pose(epoch: Dict[str, Any]) -> Dict[str, Any]:
     entries: List[Dict[str, Any]] = []
     tick_hz = float(epoch.get("clock", {}).get("tick_hz", STATE.tick_hz))
+    clock_mode = epoch.get("clock", {}).get("mode")
+    observation_kind = epoch.get("observation_kind", "absolute_rx")
     min_required = STATE.dim + 1
+
     for anchor in epoch.get("anchors", []):
         anchor_id = anchor.get("id")
         if anchor_id not in STATE.anchors:
             continue
-        t_corr = STATE.convert_anchor_time(anchor_id, anchor.get("t_rx_anc", 0.0), tick_hz)
+        ticks = float(anchor.get("t_obs_ticks", anchor.get("t_rx_anc", 0.0)))
+        if observation_kind == OBS_KIND_TOA or clock_mode == DRONE_CLOCK_MODE:
+            t_corr = ticks / tick_hz
+        else:
+            t_corr = STATE.convert_anchor_time(anchor_id, ticks, tick_hz)
         q = float(anchor.get("q", DEFAULT_Q_NS2))
         if q <= 0.0:
             q = DEFAULT_Q_NS2
         sigma_ns = math.sqrt(q)
-        sigma_m = sigma_ns * 1e-9 * C_AIR
-        if sigma_m < 1e-6:
-            sigma_m = 1e-6
-        base_weight = 1.0 / (sigma_m ** 2)
-        base_weight *= _quality_weight(anchor)
+        sigma_m = max(sigma_ns * 1e-9 * C_AIR, 1e-6)
+        base_weight = (1.0 / (sigma_m ** 2)) * _quality_weight(anchor)
         entries.append(
             {
                 "id": anchor_id,
@@ -269,28 +326,32 @@ def compute_pose(epoch: Dict[str, Any]) -> Dict[str, Any]:
                 "raw": anchor,
             }
         )
+
     if len(entries) < min_required:
         return {"ok": False, "reason": "insufficient_anchors"}
-    entries.sort(key=lambda e: e["id"])
+
+    entries.sort(key=lambda item: item["id"])
     for idx, item in enumerate(entries):
         if item["id"] == "A1":
             if idx != 0:
                 entries.insert(0, entries.pop(idx))
             break
-    initial_ids = [e["id"] for e in entries]
+
+    initial_ids = [entry["id"] for entry in entries]
     active = entries[:]
     dropped: List[str] = []
     solved = None
+
     for _ in range(3):
         if len(active) < min_required:
             return {"ok": False, "reason": "insufficient_anchors"}
-        ids = [e["id"] for e in active]
+        ids = [entry["id"] for entry in active]
         ref = active[0]
         ref_id = ref["id"]
         t0 = ref["t"]
-        dt = np.array([e["t"] - t0 for e in active[1:]], dtype=float)
+        dt = np.array([entry["t"] - t0 for entry in active[1:]], dtype=float)
         drho = C_AIR * dt
-        weights = np.array([e["weight"] for e in active[1:]], dtype=float)
+        weights = np.array([entry["weight"] for entry in active[1:]], dtype=float)
         anchors_xyz = STATE.anchors_array(ids)[:, : STATE.dim]
         x0 = np.mean(anchors_xyz, axis=0)
         solved = solve_tdoa(
@@ -302,11 +363,6 @@ def compute_pose(epoch: Dict[str, Any]) -> Dict[str, Any]:
             weights=weights,
         )
         residuals = solved.get("residuals", np.zeros((len(active) - 1,)))
-        # Estimate the common bias in residuals. A large bias usually indicates the
-        # reference anchor is corrupted because every other anchor is measured
-        # relative to it. Removing this shared offset before evaluating the other
-        # anchors prevents falsely gating the good ones and lets us reject the
-        # bad reference instead.
         bias = 0.0
         if len(residuals):
             if np.sum(weights) > 0.0:
@@ -328,12 +384,13 @@ def compute_pose(epoch: Dict[str, Any]) -> Dict[str, Any]:
             dropped.extend(gating_ids)
             continue
         break
+
     if solved is None:
         return {"ok": False, "reason": "solver_failed"}
-    ids = [e["id"] for e in active]
+
+    ids = [entry["id"] for entry in active]
     ref_id = ids[0]
     solved["used"] = len(active)
-    # EKF update
     if STATE.last_t is None:
         dt_ekf = 1.0 / 50.0
     else:
@@ -345,10 +402,7 @@ def compute_pose(epoch: Dict[str, Any]) -> Dict[str, Any]:
     STATE.ekf.predict(dt_ekf)
     z = solved["x"]
     cov = solved.get("cov")
-    if cov is not None:
-        R = cov
-    else:
-        R = np.eye(STATE.dim) * 0.05
+    R = cov if cov is not None else np.eye(STATE.dim) * 0.05
     try:
         STATE.ekf.update(z, R)
     except np.linalg.LinAlgError:
@@ -361,7 +415,6 @@ def compute_pose(epoch: Dict[str, Any]) -> Dict[str, Any]:
     pose_vec = np.array([float(pos[i]) for i in range(STATE.dim)])
     vel_vec = np.array([float(vel[i]) for i in range(STATE.dim)])
     pos_cov = P[: STATE.dim, : STATE.dim]
-    cov_list = pos_cov.tolist()
     residual_rms_ns = float(solved.get("rms", 0.0)) / C_AIR * 1e9
     gdop = None
     if solved.get("cov") is not None:
@@ -375,7 +428,7 @@ def compute_pose(epoch: Dict[str, Any]) -> Dict[str, Any]:
         "tag_tx_seq": int(epoch.get("tag_tx_seq", -1)),
         "pose": {"x": pose_vec[0], "y": pose_vec[1], "z": pose_vec[2] if STATE.dim >= 3 else 0.0},
         "vel": {"x": vel_vec[0], "y": vel_vec[1], "z": vel_vec[2] if STATE.dim >= 3 else 0.0},
-        "cov": cov_list,
+        "cov": pos_cov.tolist(),
         "status": {
             "anchors_used": int(solved.get("used", len(active))),
             "residual_rms_ns": residual_rms_ns,
@@ -391,8 +444,23 @@ def compute_pose(epoch: Dict[str, Any]) -> Dict[str, Any]:
         "anchors_used": ids,
         "outliers": dropped,
         "residual_rms_ns": residual_rms_ns,
+        "source": epoch.get("source"),
     }
     return result
+
+
+async def _process_epoch(epoch: Dict[str, Any]) -> None:
+    out = compute_pose(epoch)
+    STATE.log_manager.log(epoch, out if out.get("ok") else None)
+    if out.get("ok"):
+        await STATE.ws.publish(out)
+    else:
+        STATE.stats = {
+            "last_seq": int(epoch.get("tag_tx_seq", -1)),
+            "anchors_seen": [anchor.get("id") for anchor in epoch.get("anchors", [])],
+            "reason": out.get("reason"),
+            "source": epoch.get("source"),
+        }
 
 
 async def udp_ingest_task(host: str = "127.0.0.1", port: int = 9000) -> None:
@@ -402,19 +470,61 @@ async def udp_ingest_task(host: str = "127.0.0.1", port: int = 9000) -> None:
         def datagram_received(self, data: bytes, addr):
             try:
                 epoch = parse_packet(data)
-                out = compute_pose(epoch)
-                if out.get("ok"):
-                    asyncio.create_task(STATE.ws.publish(out))
-                    STATE.log_manager.log(data, out)
+                asyncio.create_task(_process_epoch(epoch))
             except Exception as exc:
-                print(f"ingest error: {exc}")
+                STATE.ingest_status["udp"]["last_error"] = str(exc)
 
-    transport, _ = await loop.create_datagram_endpoint(lambda: Proto(), local_addr=(host, port))
+    transport = None
     try:
+        transport, _ = await loop.create_datagram_endpoint(lambda: Proto(), local_addr=(host, port))
+        STATE.ingest_status["udp"]["listening"] = True
+        STATE.ingest_status["udp"]["last_error"] = None
         while STATE.running:
             await asyncio.sleep(0.1)
+    except Exception as exc:
+        STATE.ingest_status["udp"]["last_error"] = str(exc)
     finally:
-        transport.close()
+        STATE.ingest_status["udp"]["listening"] = False
+        if transport is not None:
+            transport.close()
+
+
+async def drone_serial_ingest_task() -> None:
+    port = getattr(config, "SERIAL_PORT", "")
+    baudrate = int(getattr(config, "SERIAL_BAUDRATE", 115200))
+    timeout_s = float(getattr(config, "SERIAL_TIMEOUT_S", 1.0))
+    STATE.ingest_status["serial"]["port"] = port
+    STATE.ingest_status["serial"]["baudrate"] = baudrate
+    if serial is None:
+        STATE.ingest_status["serial"]["last_error"] = "pyserial_not_installed"
+        return
+    if not port:
+        STATE.ingest_status["serial"]["last_error"] = "serial_port_not_configured"
+        return
+    while STATE.running:
+        try:
+            with serial.Serial(port, baudrate=baudrate, timeout=timeout_s) as ser:
+                STATE.ingest_status["serial"]["connected"] = True
+                STATE.ingest_status["serial"]["last_error"] = None
+                STATE.serial_assembler.reset()
+                while STATE.running:
+                    raw = await asyncio.to_thread(ser.readline)
+                    if not raw:
+                        continue
+                    line = raw.decode("utf-8", errors="ignore").strip()
+                    if not line:
+                        continue
+                    epochs = STATE.serial_assembler.ingest_line(line, now_s=time.time())
+                    for epoch in epochs:
+                        await _process_epoch(epoch)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            STATE.ingest_status["serial"]["connected"] = False
+            STATE.ingest_status["serial"]["last_error"] = str(exc)
+            await asyncio.sleep(1.0)
+        finally:
+            STATE.ingest_status["serial"]["connected"] = False
 
 
 async def stop_replay_task() -> None:
@@ -430,32 +540,23 @@ async def stop_replay_task() -> None:
 
 async def replay_log(path: str, speed: float = 1.0) -> None:
     try:
-        with open(path, "rb") as fh:
-            prev_t: Optional[float] = None
-            while True:
-                hdr = fh.read(4)
-                if not hdr:
-                    break
-                frame_len = struct.unpack("<I", hdr)[0]
-                payload = fh.read(frame_len)
-                if len(payload) != frame_len:
-                    break
-                epoch = parse_packet(payload)
-                out = compute_pose(epoch)
-                if out.get("ok"):
-                    await STATE.ws.publish(out)
-                t_tx = epoch.get("t_tx_tag")
-                if t_tx is not None:
-                    if prev_t is None:
-                        prev_t = float(t_tx)
-                    else:
-                        dt = (float(t_tx) - prev_t) / max(speed, 1e-6)
-                        prev_t = float(t_tx)
-                        if dt > 0:
-                            await asyncio.sleep(dt)
+        prev_t: Optional[float] = None
+        for epoch in iter_logged_epochs(path):
+            out = compute_pose(epoch)
+            if out.get("ok"):
+                await STATE.ws.publish(out)
+            t_tx = epoch.get("t_tx_tag")
+            if t_tx is not None:
+                if prev_t is None:
+                    prev_t = float(t_tx)
                 else:
-                    await asyncio.sleep(max(0.0, 1.0 / 50.0 / max(speed, 1e-6)))
-            await asyncio.sleep(0.01)
+                    dt = (float(t_tx) - prev_t) / max(speed, 1e-6)
+                    prev_t = float(t_tx)
+                    if dt > 0:
+                        await asyncio.sleep(dt)
+            else:
+                await asyncio.sleep(max(0.0, 1.0 / 50.0 / max(speed, 1e-6)))
+        await asyncio.sleep(0.01)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -465,7 +566,11 @@ async def replay_log(path: str, speed: float = 1.0) -> None:
 @app.on_event("startup")
 async def on_start() -> None:
     load_calibration()
-    asyncio.create_task(udp_ingest_task())
+    STATE.set_source_mode(getattr(config, "INGEST_MODE", "legacy_udp"))
+    if STATE.source_mode == "drone_serial":
+        asyncio.create_task(drone_serial_ingest_task())
+    else:
+        asyncio.create_task(udp_ingest_task(host=getattr(config, "UDP_HOST", "127.0.0.1"), port=int(getattr(config, "UDP_PORT", 9000))))
 
 
 @app.get("/healthz")
@@ -474,6 +579,9 @@ async def healthz():
         "status": "ok",
         "anchors": list(STATE.anchors.keys()),
         "clock": STATE.clock_params,
+        "radio_schedule": STATE.radio_schedule,
+        "source_mode": STATE.source_mode,
+        "ingest": STATE.health_ingest_snapshot(),
         "logging": STATE.log_manager.is_active(),
         "replay_running": STATE.replay_task is not None and not STATE.replay_task.done(),
         "stats": STATE.stats,
@@ -485,11 +593,7 @@ async def get_anchors():
     anchors = [
         {
             "id": key,
-            "pos": {
-                "x": float(val[0]),
-                "y": float(val[1]),
-                "z": float(val[2]),
-            },
+            "pos": {"x": float(val[0]), "y": float(val[1]), "z": float(val[2])},
         }
         for key, val in STATE.anchors.items()
     ]
@@ -502,7 +606,7 @@ async def get_anchors():
         }
         for key, val in STATE.clock_params.items()
     ]
-    return {"anchors": anchors, "anchor_clocks": clocks}
+    return {"anchors": anchors, "anchor_clocks": clocks, "radio_schedule": STATE.radio_schedule}
 
 
 @app.post("/set_anchors")
@@ -514,25 +618,50 @@ async def set_anchors(payload: Dict[str, Any] = Body(...)):
         if not anchor_id:
             continue
         pos = anchor.get("pos", {})
-        anchors[anchor_id] = np.array([
-            float(pos.get("x", 0.0)),
-            float(pos.get("y", 0.0)),
-            float(pos.get("z", 0.0)),
-        ])
+        anchors[anchor_id] = np.array(
+            [
+                float(pos.get("x", 0.0)),
+                float(pos.get("y", 0.0)),
+                float(pos.get("z", 0.0)),
+            ]
+        )
     if not anchors:
         raise HTTPException(status_code=400, detail="no anchors provided")
     STATE.anchors = anchors
     STATE.update_dimension_from_anchors()
-    clock_payload = payload.get("anchor_clocks") or payload.get("clocks") or []
+    clock_payload_provided = "anchor_clocks" in payload or "clocks" in payload
+    clock_payload = payload.get("anchor_clocks") if "anchor_clocks" in payload else payload.get("clocks")
+    if clock_payload_provided and not isinstance(clock_payload, list):
+        raise HTTPException(status_code=400, detail="anchor_clocks must be a list")
     if isinstance(clock_payload, list):
         STATE.update_clock_params(clock_payload)
+    persisted_clocks = (
+        clock_payload
+        if isinstance(clock_payload, list)
+        else [
+            {
+                "id": key,
+                "offset_ns": float(val.get("offset_ns", 0.0)),
+                "drift_ppm": float(val.get("drift_ppm", 0.0)),
+                "valid": bool(val.get("valid", True)),
+            }
+            for key, val in STATE.clock_params.items()
+        ]
+    )
+    radio_schedule_provided = "radio_schedule" in payload
+    radio_schedule_payload = payload.get("radio_schedule") if radio_schedule_provided else dict(STATE.radio_schedule)
+    if radio_schedule_provided:
+        STATE.update_radio_schedule(radio_schedule_payload)
     STATE.reset_filter()
-    save_calibration({
-        "anchors": anchors_payload,
-        "anchor_clocks": clock_payload,
-        "frame": payload.get("frame"),
-        "map_id": payload.get("map_id"),
-    })
+    save_calibration(
+        {
+            "anchors": anchors_payload,
+            "anchor_clocks": persisted_clocks,
+            "radio_schedule": radio_schedule_payload,
+            "frame": payload.get("frame"),
+            "map_id": payload.get("map_id"),
+        }
+    )
     return {"ok": True, "count": len(anchors)}
 
 
@@ -552,7 +681,7 @@ async def stop_log():
 
 
 @app.post("/replay")
-async def replay(file: str = Query(..., description="Relative or absolute path to .bin log"), speed: float = Query(1.0)):
+async def replay(file: str = Query(..., description="Relative or absolute path to a replayable log"), speed: float = Query(1.0)):
     async with STATE.replay_lock:
         if file.lower() in {"stop", "none"}:
             await stop_replay_task()
@@ -569,12 +698,12 @@ async def replay(file: str = Query(..., description="Relative or absolute path t
 @app.websocket("/stream")
 async def stream(ws: WebSocket):
     await ws.accept()
-    q = await STATE.ws.add_client()
+    queue = await STATE.ws.add_client()
     try:
         while True:
-            msg = await q.get()
+            msg = await queue.get()
             await ws.send_text(msg)
     except WebSocketDisconnect:
         pass
     finally:
-        await STATE.ws.remove_client(q)
+        await STATE.ws.remove_client(queue)
