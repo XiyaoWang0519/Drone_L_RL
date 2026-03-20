@@ -64,6 +64,7 @@ void dw_port_reset_deassert(void);
 #define CAL_TWR_MIN_VALID_SAMPLES     2U
 #define CAL_TWR_ATTEMPTS              MAX(CAL_TWR_SAMPLES, 8U)
 #define CAL_SYNC_BROADCASTS           MAX(CAL_SYNC_SAMPLES + 2U, 8U)
+#define CAL_READY_SYNC_BURST          2U
 
 #define BEACON_ID      CONFIG_UWB_BEACON_ID
 #define BEACON_SLOT_ID CONFIG_UWB_BEACON_SLOT_ID
@@ -176,6 +177,8 @@ struct twr_samples {
 struct discovered_slave {
     uint8_t beacon_id;
     uint8_t slot_id;
+    uint8_t last_state;
+    uint16_t sync_samples;
     bool hello_seen;
     bool self_ready;
     bool delay_valid;
@@ -2061,7 +2064,7 @@ static bool master_range_slave(struct discovered_slave *slave, uint16_t *cal_seq
     return got_valid_report && slave->delay_valid;
 }
 
-static void master_send_clock_syncs(uint16_t *sync_seq)
+static void master_send_clock_syncs(uint16_t *sync_seq, uint32_t burst_count)
 {
     uint32_t tx_ok = 0U;
     uint32_t tx_late = 0U;
@@ -2070,8 +2073,7 @@ static void master_send_clock_syncs(uint16_t *sync_seq)
     const uint32_t superframe_dtu = uus_to_dx_time(SUPERFRAME_UUS);
     const uint32_t tx_guard_dtu = uus_to_dx_time(TX_GUARD_UUS);
 
-    on_state_change(UWB_ANCHOR_STATE_CLOCK_CAL);
-    for (uint32_t i = 0; i < CAL_SYNC_BROADCASTS; ++i) {
+    for (uint32_t i = 0; i < burst_count; ++i) {
         uint32_t now = get_sys_time_u32();
         next_sync_dtu = guard_tx_time(next_sync_dtu, now, tx_guard_dtu, 0U);
         uint32_t sync_dx_time = quantize_delayed_time(next_sync_dtu);
@@ -2098,18 +2100,17 @@ static void master_send_clock_syncs(uint16_t *sync_seq)
     }
 }
 
-static size_t master_collect_status(struct discovered_slave *slaves, size_t count, uint16_t *cal_seq)
+static bool master_collect_status_for_slave(struct discovered_slave *slave, uint16_t *cal_seq)
 {
     uint32_t tx_ok = 0U;
     uint32_t tx_late = 0U;
     uint32_t tx_timeout = 0U;
-    size_t ready = 0U;
     uint16_t seq = ++(*cal_seq);
     struct uwb_cal_frame req = {
         .frame_type = UWB_FRAME_TYPE_CAL,
         .msg_type = UWB_CAL_MSG_STATUS_REQ,
         .src_id = BEACON_ID,
-        .dst_id = UWB_BROADCAST_ID,
+        .dst_id = slave->beacon_id,
         .seq = seq,
         .slot_id = BEACON_SLOT_ID,
         .flags = 0U,
@@ -2122,38 +2123,92 @@ static size_t master_collect_status(struct discovered_slave *slaves, size_t coun
     if (!send_cal_frame_after_uus(&req, CAL_CONTROL_TX_DELAY_UUS, "CAL_STAT_REQ",
                                   &tx_ok, &tx_late, &tx_timeout,
                                   DWT_START_TX_DELAYED, 0U, 0U)) {
+        return false;
+    }
+
+    struct uwb_cal_frame status;
+    if (!receive_matching_cal_frame(UWB_CAL_MSG_STATUS, slave->beacon_id, BEACON_ID, seq,
+                                    CAL_WAIT_MS, &status, NULL)) {
+        printk("CAL: status timeout slave=%u seq=%u\n", slave->beacon_id, seq);
+        return false;
+    }
+
+    slave->last_state = status.flags;
+    slave->sync_samples = status.value16;
+    slave->path_delay_ticks = (int64_t)status.ts_a;
+    slave->self_ready =
+        (status.flags == UWB_ANCHOR_STATE_SELF_READY) ||
+        (status.flags == UWB_ANCHOR_STATE_NETWORK_READY) ||
+        (status.flags == UWB_ANCHOR_STATE_LOCALIZE);
+
+    printk("CAL: status slave=%u state=%u samples=%u path=%llu ready=%u\n",
+           status.src_id,
+           status.flags,
+           status.value16,
+           (unsigned long long)status.ts_a,
+           slave->self_ready ? 1U : 0U);
+    return true;
+}
+
+static size_t count_ready_slaves(const struct discovered_slave *slaves, size_t count)
+{
+    size_t ready = 0U;
+
+    for (size_t i = 0; i < count; ++i) {
+        if (slaves[i].self_ready) {
+            ready++;
+        }
+    }
+
+    return ready;
+}
+
+static uint32_t ready_timeout_ms(size_t slave_count)
+{
+    uint32_t participants = (uint32_t)MAX(slave_count, (size_t)MAX(CAL_EXPECTED_SLAVES, 1U));
+    uint32_t sync_budget_ms =
+        (uint32_t)(((uint64_t)participants * MAX(CAL_SYNC_SAMPLES, 1U) * SUPERFRAME_UUS * 4U) / 1000U);
+
+    return MAX(2000U, sync_budget_ms);
+}
+
+static size_t master_wait_for_slaves_ready(struct discovered_slave *slaves, size_t count,
+                                           uint16_t *cal_seq, uint16_t *sync_seq)
+{
+    int64_t deadline = k_uptime_get() + ready_timeout_ms(count);
+    size_t ready = 0U;
+
+    if (count == 0U) {
+        printk("CAL: 0 slave(s) reported self-ready\n");
         return 0U;
     }
 
-    int64_t deadline = k_uptime_get() + CAL_WAIT_MS;
+    on_state_change(UWB_ANCHOR_STATE_CLOCK_CAL);
+    master_send_clock_syncs(sync_seq, CAL_SYNC_BROADCASTS);
+
     while (k_uptime_get() < deadline) {
-        struct uwb_cal_frame status;
-        if (!receive_matching_cal_frame(UWB_CAL_MSG_STATUS, UWB_BROADCAST_ID, BEACON_ID, seq,
-                                        (uint32_t)MAX(1LL, deadline - k_uptime_get()),
-                                        &status, NULL)) {
+        size_t before = ready;
+
+        for (size_t i = 0; i < count; ++i) {
+            if (slaves[i].self_ready) {
+                continue;
+            }
+            (void)master_collect_status_for_slave(&slaves[i], cal_seq);
+        }
+
+        ready = count_ready_slaves(slaves, count);
+        if (ready == count) {
             break;
         }
 
-        for (size_t i = 0; i < count; ++i) {
-            if (slaves[i].beacon_id == status.src_id) {
-                slaves[i].self_ready =
-                    (status.flags == UWB_ANCHOR_STATE_SELF_READY) ||
-                    (status.flags == UWB_ANCHOR_STATE_NETWORK_READY) ||
-                    (status.flags == UWB_ANCHOR_STATE_LOCALIZE);
-                printk("CAL: status slave=%u state=%u samples=%u path=%llu ready=%u\n",
-                       status.src_id,
-                       status.flags,
-                       status.value16,
-                       (unsigned long long)status.ts_a,
-                       slaves[i].self_ready ? 1U : 0U);
-                if (slaves[i].self_ready) {
-                    ready++;
-                }
-                break;
-            }
+        master_send_clock_syncs(sync_seq, CAL_READY_SYNC_BURST);
+
+        if (ready == before) {
+            k_msleep(5);
         }
     }
 
+    ready = count_ready_slaves(slaves, count);
     printk("CAL: %u slave(s) reported self-ready\n", (unsigned int)ready);
     return ready;
 }
@@ -2163,6 +2218,10 @@ static void master_broadcast_network(uint8_t signal, uint32_t roster_hash, uint1
     uint32_t tx_ok = 0U;
     uint32_t tx_late = 0U;
     uint32_t tx_timeout = 0U;
+    const uint32_t network_tx_delay_uus =
+        CAL_CONTROL_TX_DELAY_UUS +
+        CAL_STATUS_RESP_BASE_UUS +
+        ((uint32_t)(MAX(CAL_EXPECTED_SLAVES, 1) + 1U) * CAL_STATUS_RESP_SLOT_UUS);
 
     for (uint32_t i = 0; i < CAL_NETWORK_BROADCASTS; ++i) {
         struct uwb_cal_frame network = {
@@ -2178,7 +2237,7 @@ static void master_broadcast_network(uint8_t signal, uint32_t roster_hash, uint1
             .ts_b = compute_schedule_hash(),
             .ts_c = 0U,
         };
-        (void)send_cal_frame_after_uus(&network, CAL_CONTROL_TX_DELAY_UUS, "CAL_NET",
+        (void)send_cal_frame_after_uus(&network, network_tx_delay_uus, "CAL_NET",
                                        &tx_ok, &tx_late, &tx_timeout,
                                        DWT_START_TX_DELAYED, 0U, 0U);
         k_msleep(10);
@@ -2219,6 +2278,7 @@ static void master_localization_loop(uint8_t network_signal)
         slot_start_dtu +
         (uint32_t)(((uint64_t)BEACON_SLOT_ID * SLOT_UUS * UUS_TO_DWT_TIME) >> 8);
     const uint32_t start_delay_dtu = uus_to_dx_time(TX_START_DELAY_UUS);
+    const uint32_t initial_sync_delay_dtu = MAX(superframe_dtu, start_delay_dtu);
     const uint32_t tx_guard_dtu = uus_to_dx_time(TX_GUARD_UUS);
     uint16_t superframe_seq = 0U;
     uint32_t next_sync_dtu = 0U;
@@ -2239,7 +2299,8 @@ static void master_localization_loop(uint8_t network_signal)
 
         uint32_t now = get_sys_time_u32();
         if (!scheduled) {
-            next_sync_dtu = now + start_delay_dtu;
+            /* Leave one full superframe of margin after calibration traffic. */
+            next_sync_dtu = now + initial_sync_delay_dtu;
             scheduled = true;
         }
         next_sync_dtu = guard_tx_time(next_sync_dtu, now, tx_guard_dtu, 0U);
@@ -2318,8 +2379,7 @@ static void master_run(void)
     for (size_t i = 0; i < slave_count; ++i) {
         (void)master_range_slave(&slaves[i], &cal_seq);
     }
-    master_send_clock_syncs(&sync_seq);
-    ready_count = master_collect_status(slaves, slave_count, &cal_seq);
+    ready_count = master_wait_for_slaves_ready(slaves, slave_count, &cal_seq, &sync_seq);
 
     roster_ids[0] = BEACON_ID;
     for (size_t i = 0; i < slave_count; ++i) {
