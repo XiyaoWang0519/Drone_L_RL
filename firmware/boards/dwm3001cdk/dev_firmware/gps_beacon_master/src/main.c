@@ -112,21 +112,6 @@ static uint32_t get_sys_time_u32(void)
 
 static const struct device *cdc_dev;
 static volatile bool running = true;
-static bool running_auto_paused = false;
-
-static bool usb_console_dtr_asserted(void)
-{
-    if (!cdc_dev || !device_is_ready(cdc_dev)) {
-        return false;
-    }
-
-    uint32_t dtr = 0;
-    if (uart_line_ctrl_get(cdc_dev, UART_LINE_CTRL_DTR, &dtr) != 0) {
-        return false;
-    }
-
-    return dtr != 0U;
-}
 
 static void poll_console_keys(void)
 {
@@ -142,13 +127,11 @@ static void poll_console_keys(void)
         if (c == 's' || c == 'S') {
             if (!running) {
                 running = true;
-                running_auto_paused = false;
                 printk("[console] start\n");
             }
         } else if (c == 'p' || c == 'P') {
             if (running) {
                 running = false;
-                running_auto_paused = false;
                 printk("[console] pause\n");
             }
         }
@@ -168,14 +151,7 @@ static void usb_ready_wait(void)
         return;
     }
 
-    uint32_t dtr = 0;
-    while (true) {
-        (void)uart_line_ctrl_get(cdc_dev, UART_LINE_CTRL_DTR, &dtr);
-        if (dtr) {
-            break;
-        }
-        k_msleep(50);
-    }
+    /* Allow a short settle time for CDC init, but do not block on host DTR. */
     k_msleep(50);
 }
 
@@ -682,16 +658,6 @@ void main(void)
 #endif
 
     while (1) {
-        bool host_attached = usb_console_dtr_asserted();
-        if (!host_attached && running) {
-            running = false;
-            running_auto_paused = true;
-        } else if (host_attached && running_auto_paused && !running) {
-            running = true;
-            running_auto_paused = false;
-            printk("[console] start (auto)\n");
-        }
-
         poll_console_keys();
         if (!running) {
 #if defined(CONFIG_ROLE_SLAVE_ANCHOR)
