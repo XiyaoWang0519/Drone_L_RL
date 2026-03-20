@@ -65,6 +65,7 @@ void dw_port_reset_deassert(void);
 #define CAL_TWR_ATTEMPTS              MAX(CAL_TWR_SAMPLES, 8U)
 #define CAL_SYNC_BROADCASTS           MAX(CAL_SYNC_SAMPLES + 2U, 8U)
 #define CAL_READY_SYNC_BURST          2U
+#define CAL_GEOMETRY_REPLAY_COUNT     2U
 
 #define BEACON_ID      CONFIG_UWB_BEACON_ID
 #define BEACON_SLOT_ID CONFIG_UWB_BEACON_SLOT_ID
@@ -2329,6 +2330,42 @@ static bool master_collect_geometry_edge(struct geometry_edge *edges, size_t *ed
     return true;
 }
 
+static void master_replay_geometry_edges(const struct geometry_edge *edges, size_t edge_count,
+                                         uint32_t roster_hash, uint16_t *cal_seq)
+{
+    for (size_t i = 0; i < edge_count; ++i) {
+        const struct geometry_edge *edge = &edges[i];
+
+        if (!edge->valid) {
+            continue;
+        }
+
+        for (uint8_t replay = 0U; replay < CAL_GEOMETRY_REPLAY_COUNT; ++replay) {
+            uint32_t tx_ok = 0U;
+            uint32_t tx_late = 0U;
+            uint32_t tx_timeout = 0U;
+            struct uwb_cal_frame report = {
+                .frame_type = UWB_FRAME_TYPE_CAL,
+                .msg_type = UWB_CAL_MSG_PAIR_REPORT,
+                .src_id = edge->a_id,
+                .dst_id = edge->b_id,
+                .seq = ++(*cal_seq),
+                .slot_id = replay,
+                .flags = 1U,
+                .value16 = (uint16_t)MIN(edge->distance_mm, 65535U),
+                .ts_a = (uint64_t)edge->path_delay_ticks,
+                .ts_b = roster_hash,
+                .ts_c = 0U,
+            };
+
+            (void)send_cal_frame_after_uus(&report, CAL_CONTROL_TX_DELAY_UUS, "CAL_PAIR_REP",
+                                           &tx_ok, &tx_late, &tx_timeout,
+                                           DWT_START_TX_DELAYED, 0U, 0U);
+            k_msleep(5);
+        }
+    }
+}
+
 static bool master_geometry_pair_with_master(uint8_t responder_id, uint8_t sample_idx,
                                              uint32_t roster_hash,
                                              uint16_t *cal_seq,
@@ -2412,6 +2449,7 @@ static void master_collect_geometry_graph(struct discovered_slave *slaves, size_
            (unsigned int)valid_edges,
            (unsigned int)geometry_expected_edge_count(roster_count),
            status_code);
+    master_replay_geometry_edges(edges, edge_count, roster_hash, cal_seq);
     master_broadcast_geom_done(status_code, roster_hash, (uint16_t)valid_edges,
                                (uint8_t)roster_count, cal_seq);
 }

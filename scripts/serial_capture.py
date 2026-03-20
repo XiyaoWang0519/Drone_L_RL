@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import glob
 import pathlib
 import sys
 import time
@@ -30,7 +31,12 @@ def default_output_path(port: str) -> pathlib.Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", required=True, help="Serial port, e.g. /dev/cu.usbmodem1101")
+    port_group = parser.add_mutually_exclusive_group(required=True)
+    port_group.add_argument("--port", help="Serial port, e.g. /dev/cu.usbmodem1101")
+    port_group.add_argument(
+        "--port-glob",
+        help="Glob pattern for serial ports, e.g. /dev/cu.usbmodem*",
+    )
     parser.add_argument("--baud", type=int, default=115200, help="Baud rate")
     parser.add_argument(
         "--duration",
@@ -54,6 +60,11 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Wait up to this many seconds for the serial port to appear",
     )
+    parser.add_argument(
+        "--new-port-only",
+        action="store_true",
+        help="With --port-glob, wait for a new matching port that was not present at startup",
+    )
     return parser.parse_args()
 
 
@@ -76,15 +87,59 @@ def open_serial_when_available(port: str, baud: int, wait_for_port: float) -> se
     raise last_error
 
 
+def resolve_port_from_glob(pattern: str, baseline: set[str], new_port_only: bool) -> str | None:
+    matches = sorted(glob.glob(pattern))
+    if new_port_only:
+        matches = [m for m in matches if m not in baseline]
+    return matches[0] if matches else None
+
+
+def open_serial_from_glob(
+    pattern: str,
+    baud: int,
+    wait_for_port: float,
+    new_port_only: bool,
+) -> tuple[serial.Serial, str]:
+    deadline = time.monotonic() + max(wait_for_port, 0.0)
+    baseline = set(glob.glob(pattern))
+    last_error: Exception | None = None
+
+    while True:
+        port = resolve_port_from_glob(pattern, baseline, new_port_only)
+        if port is not None:
+            try:
+                return serial.Serial(port, baud, timeout=0.2), port
+            except SerialException as exc:
+                last_error = exc
+
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.2)
+
+    if last_error is not None:
+        raise last_error
+    raise SerialException(f"timed out waiting for port matching {pattern}")
+
+
 def main() -> int:
     args = parse_args()
-    output_path = args.output or default_output_path(args.port)
+    output_path = args.output or default_output_path(args.port or args.port_glob or "serial")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         if args.wait_for_port > 0:
-            print(f"waiting for {args.port} for up to {args.wait_for_port:.1f}s")
-        ser = open_serial_when_available(args.port, args.baud, args.wait_for_port)
+            target = args.port or args.port_glob
+            print(f"waiting for {target} for up to {args.wait_for_port:.1f}s")
+        if args.port:
+            port_name = args.port
+            ser = open_serial_when_available(port_name, args.baud, args.wait_for_port)
+        else:
+            ser, port_name = open_serial_from_glob(
+                args.port_glob,
+                args.baud,
+                args.wait_for_port,
+                args.new_port_only,
+            )
     except SerialException as exc:
         print(f"serial open failed: {exc}", file=sys.stderr)
         return 1
@@ -92,7 +147,7 @@ def main() -> int:
     deadline = time.monotonic() + max(args.duration, 0.0)
     line_count = 0
 
-    print(f"capturing {args.port} for {args.duration:.1f}s -> {output_path}")
+    print(f"capturing {port_name} for {args.duration:.1f}s -> {output_path}")
     with ser, output_path.open("w", encoding="utf-8") as fp:
         while time.monotonic() < deadline:
             try:
