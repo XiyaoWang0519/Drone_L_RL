@@ -42,7 +42,7 @@ config UWB_BEACON_FLAGS
 
 config UWB_SUPERFRAME_UUS
     int "Superframe duration (UUS)"
-    default 50000
+    default 20000
     range 1000 200000
     help
       Superframe period in UWB microseconds (approximately microseconds).
@@ -95,6 +95,163 @@ config UWB_SLAVE_IDLE_LOG_PERIOD
     range 1 10000
     help
       Loop count between idle status logs on the slave.
+
+config UWB_ENABLE_BLINK_TX
+    bool "Enable slot BLINK transmissions"
+    default y
+    help
+      Keep enabled for localization. Calibration phases suppress BLINKs
+      automatically until the network is ready.
+
+config UWB_SLAVE_RX_WINDOWED
+    bool "Use predicted SYNC RX windows on the slave"
+    default y
+    help
+      Narrow the SYNC receive window once a clock model is available.
+
+config UWB_SLAVE_RX_EARLY_UUS
+    int "Slave RX early margin (UUS)"
+    default 3500
+    range 100 20000
+    help
+      Amount of time before the predicted SYNC arrival to open the windowed RX.
+
+config UWB_SLAVE_RX_WINDOW_UUS
+    int "Slave RX window size (UUS)"
+    default 8000
+    range 500 40000
+    help
+      Total receive window used around the predicted SYNC arrival.
+
+config UWB_SLAVE_RX_WINDOW_PERSIST_MISSES
+    int "Consecutive predicted-window misses before full search"
+    default 3
+    range 1 50
+    help
+      Number of misses tolerated before the slave falls back to wide-open RX.
+
+config UWB_SLAVE_RX_MIN_ARM_UUS
+    int "Minimum advance time for arming delayed RX (UUS)"
+    default 400
+    range 50 5000
+    help
+      Minimum lead time needed before delayed receive can be armed safely.
+
+config UWB_SLAVE_RX_WINDOW_IMMEDIATE_FALLBACK
+    bool "Allow immediate RX fallback near a predicted SYNC"
+    default y
+    help
+      If the predicted delayed RX arm is too late, fall back to immediate RX
+      within the remaining window.
+
+config UWB_CAL_DISCOVERY_ROUNDS
+    int "Discovery rounds before calibration"
+    default 3
+    range 1 16
+    help
+      Number of broadcast discovery requests sent by the master.
+
+config UWB_CAL_EXPECTED_SLAVES
+    int "Expected number of slave anchors"
+    default 3
+    range 0 15
+    help
+      If non-zero, the master prefers to see this many slaves before it
+      declares the network healthy.
+
+config UWB_CAL_TWR_SAMPLES
+    int "DS-TWR samples per master/slave link"
+    default 5
+    range 1 16
+    help
+      Number of ranging exchanges used to estimate the one-way master-slave
+      propagation delay.
+
+config UWB_CAL_SYNC_SAMPLES
+    int "SYNC samples required for clock calibration"
+    default 6
+    range 2 32
+    help
+      Number of SYNC receptions a slave gathers before it reports SELF_READY.
+
+config UWB_CAL_PERSISTENCE
+    bool "Persist calibration cache in flash"
+    default n
+    help
+      Cache the most recent calibration blob in internal flash so it can be
+      reused after reboot. Disable this during bring-up if flash-backed NVS
+      is unstable; wireless discovery, ranging, and localization still work.
+
+config UWB_CAL_WAIT_MS
+    int "Calibration wait timeout (ms)"
+    default 80
+    range 10 1000
+    help
+      Generic calibration wait timeout used for TWR and report collection.
+
+config UWB_CAL_DISCOVERY_RESP_BASE_UUS
+    int "Discovery response base delay (UUS)"
+    default 2500
+    range 200 20000
+    help
+      Base delay before a slave replies to a discovery request.
+
+config UWB_CAL_DISCOVERY_RESP_SLOT_UUS
+    int "Discovery response slot spacing (UUS)"
+    default 1800
+    range 200 10000
+    help
+      Additional delay per slot ID for staggered discovery/status responses.
+
+config UWB_CAL_STATUS_RESP_BASE_UUS
+    int "Status response base delay (UUS)"
+    default 2500
+    range 200 20000
+    help
+      Base delay before a slave replies to a status request.
+
+config UWB_CAL_STATUS_RESP_SLOT_UUS
+    int "Status response slot spacing (UUS)"
+    default 1800
+    range 200 10000
+    help
+      Additional delay per slot ID for staggered status responses.
+
+config UWB_CAL_POLL_RX_TO_RESP_TX_DLY_UUS
+    int "TWR response delay after poll RX (UUS)"
+    default 3200
+    range 500 20000
+    help
+      Delay used by the slave before transmitting a TWR response.
+
+config UWB_CAL_RESP_RX_TO_FINAL_TX_DLY_UUS
+    int "TWR final delay after response RX (UUS)"
+    default 3200
+    range 500 20000
+    help
+      Delay used by the master before transmitting the TWR final frame.
+
+config UWB_CAL_RX_TIMEOUT_UUS
+    int "TWR receive timeout (UUS)"
+    default 15000
+    range 1000 30000
+    help
+      Receive timeout used while waiting for TWR and status frames.
+
+config UWB_CAL_NETWORK_BROADCASTS
+    int "Number of network state broadcasts"
+    default 3
+    range 1 10
+    help
+      Number of times the master repeats the READY/DEGRADED broadcast.
+
+config UWB_CAL_FIXED_TX_BIAS_TICKS
+    int "Extra fixed transmit bias correction (DW ticks)"
+    default 0
+    range -200000 200000
+    help
+      Additional constant correction applied on top of the measured one-way
+      path delay when mapping master time to local TX time.
 
 endmenu
 

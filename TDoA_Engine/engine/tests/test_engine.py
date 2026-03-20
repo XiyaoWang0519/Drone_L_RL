@@ -9,7 +9,13 @@ import unittest
 import numpy as np
 
 from TDoA_Engine.engine import config as engine_config
-from TDoA_Engine.engine.autocal import estimate_clock_params, estimate_layout_from_twr
+from TDoA_Engine.engine.autocal import (
+    estimate_clock_params,
+    estimate_clock_params_with_delay,
+    estimate_ds_twr_path_delay,
+    estimate_layout_from_twr,
+    validate_layout_against_authoritative_positions,
+)
 from TDoA_Engine.engine.ingest import (
     DEFAULT_SLOT_START_UUS,
     DEFAULT_SLOT_UUS,
@@ -96,6 +102,66 @@ class TestAutocal(unittest.TestCase):
         clock = result["clocks"][0]
         self.assertAlmostEqual(clock["drift_ppm"], 0.35, places=2)
         self.assertAlmostEqual(clock["offset_ns"], 25.0, places=1)
+
+    def test_clock_estimation_with_path_delay_correction(self):
+        t_ref = np.linspace(0.0, 0.2, 20)
+        alpha = 1.0 + 0.35e-6
+        beta = 25e-9
+        path_delay = 12e-9
+        measurements = [
+            {"id": "A2", "t_ref": float(tr), "t_anchor": float(alpha * tr + beta + path_delay)}
+            for tr in t_ref
+        ]
+        naive = estimate_clock_params(measurements)["clocks"][0]
+        corrected = estimate_clock_params_with_delay(measurements, {"A2": path_delay})["clocks"][0]
+        self.assertAlmostEqual(naive["offset_ns"], 37.0, places=1)
+        self.assertAlmostEqual(corrected["offset_ns"], 25.0, places=1)
+        self.assertAlmostEqual(corrected["drift_ppm"], 0.35, places=2)
+
+    def test_ds_twr_path_delay_estimation(self):
+        tick_hz = 63_897_600_000.0
+        tof_ticks = (8.0 / C_AIR) * tick_hz
+        master_reply_delay = 150_000.0
+        slave_reply_delay_local = 180_000.0
+        alpha = 1.0 + 0.4e-6
+        beta = 2_000.0
+        poll_tx = 1_000_000.0
+        poll_rx = alpha * (poll_tx + tof_ticks) + beta
+        resp_tx = poll_rx + slave_reply_delay_local
+        resp_tx_true = (resp_tx - beta) / alpha
+        resp_rx = resp_tx_true + tof_ticks
+        final_tx = resp_rx + master_reply_delay
+        final_rx = alpha * (final_tx + tof_ticks) + beta
+        result = estimate_ds_twr_path_delay(
+            [
+                {
+                    "poll_tx": poll_tx,
+                    "poll_rx": poll_rx,
+                    "resp_tx": resp_tx,
+                    "resp_rx": resp_rx,
+                    "final_tx": final_tx,
+                    "final_rx": final_rx,
+                }
+            ],
+            tick_hz=tick_hz,
+        )
+        self.assertEqual(result["quality"]["status"], "ok")
+        self.assertAlmostEqual(result["distance_m"], 8.0, places=3)
+
+    def test_validate_layout_against_authoritative_positions(self):
+        anchors = [
+            {"id": "A1", "pos": {"x": 0.0, "y": 0.0, "z": 2.4}},
+            {"id": "A2", "pos": {"x": 8.0, "y": 0.0, "z": 2.6}},
+            {"id": "A3", "pos": {"x": 8.0, "y": 6.0, "z": 2.2}},
+        ]
+        edges = [
+            {"a": "A1", "b": "A2", "dist_m": math.sqrt((8.0**2) + (0.2**2))},
+            {"a": "A2", "b": "A3", "dist_m": math.sqrt((6.0**2) + (0.4**2))},
+            {"a": "A1", "b": "A3", "dist_m": math.sqrt((8.0**2) + (6.0**2) + (0.2**2))},
+        ]
+        validation = validate_layout_against_authoritative_positions(edges, anchors, warn_threshold_m=0.05)
+        self.assertEqual(validation["quality"]["status"], "ok")
+        self.assertLess(validation["quality"]["rms_m"], 1e-6)
 
 
 class TestDroneConsoleParser(unittest.TestCase):
@@ -462,6 +528,7 @@ class TestCalibrationApi(unittest.TestCase):
         self.prev_clocks = http_api.STATE.clock_params.copy()
         self.prev_dim = http_api.STATE.dim
         self.prev_schedule = dict(http_api.STATE.radio_schedule)
+        self.prev_layout_validation = dict(http_api.STATE.layout_validation)
         self.prev_tick_hz = engine_config.TICK_HZ
         self.prev_calibration_file = engine_config.CALIBRATION_FILE
         self.prev_save_calibration = http_api.save_calibration
@@ -473,6 +540,7 @@ class TestCalibrationApi(unittest.TestCase):
         http_api.STATE.clock_params = self.prev_clocks
         http_api.STATE.set_dim(self.prev_dim)
         http_api.STATE.update_radio_schedule(self.prev_schedule)
+        http_api.STATE.layout_validation = self.prev_layout_validation
         http_api.STATE.reset_filter()
         engine_config.TICK_HZ = self.prev_tick_hz
         engine_config.CALIBRATION_FILE = self.prev_calibration_file
@@ -542,6 +610,50 @@ class TestCalibrationApi(unittest.TestCase):
             self.assertEqual(http_api.STATE.radio_schedule["tick_hz"], 123.0)
         finally:
             os.unlink(path)
+
+    def test_set_anchors_validates_twr_edges_against_authoritative_layout(self):
+        payload = {
+            "anchors": [
+                {"id": "A1", "pos": {"x": 0.0, "y": 0.0, "z": 2.4}},
+                {"id": "A2", "pos": {"x": 8.0, "y": 0.0, "z": 2.6}},
+                {"id": "A3", "pos": {"x": 8.0, "y": 6.0, "z": 2.2}},
+            ],
+            "twr_edges": [
+                {"a": "A1", "b": "A2", "dist_m": math.sqrt((8.0**2) + (0.2**2))},
+                {"a": "A2", "b": "A3", "dist_m": math.sqrt((6.0**2) + (0.4**2))},
+                {"a": "A1", "b": "A3", "dist_m": math.sqrt((8.0**2) + (6.0**2) + (0.2**2))},
+            ],
+            "warn_threshold_m": 0.05,
+        }
+
+        result = asyncio.run(http_api.set_anchors(payload))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["layout_validation"]["quality"]["status"], "ok")
+        self.assertEqual(http_api.STATE.layout_validation["quality"]["status"], "ok")
+        self.assertEqual(self.saved_payloads[-1]["layout_validation"]["quality"]["status"], "ok")
+
+    def test_validate_anchor_layout_endpoint_uses_current_anchors(self):
+        http_api.STATE.anchors = {
+            "A1": np.array([0.0, 0.0, 2.4]),
+            "A2": np.array([8.0, 0.0, 2.6]),
+            "A3": np.array([8.0, 6.0, 2.2]),
+        }
+        http_api.STATE.update_dimension_from_anchors()
+        payload = {
+            "twr_edges": [
+                {"a": "A1", "b": "A2", "dist_m": math.sqrt((8.0**2) + (0.2**2))},
+                {"a": "A2", "b": "A3", "dist_m": math.sqrt((6.0**2) + (0.4**2))},
+                {"a": "A1", "b": "A3", "dist_m": math.sqrt((8.0**2) + (6.0**2) + (0.2**2))},
+            ],
+            "warn_threshold_m": 0.05,
+        }
+
+        result = asyncio.run(http_api.validate_anchor_layout(payload))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["layout_validation"]["quality"]["status"], "ok")
+        self.assertEqual(http_api.STATE.layout_validation["quality"]["status"], "ok")
 
 
 if __name__ == "__main__":

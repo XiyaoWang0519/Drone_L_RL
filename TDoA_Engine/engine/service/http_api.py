@@ -70,6 +70,7 @@ except ModuleNotFoundError:  # pragma: no cover
     serial = None
 
 from .. import config
+from ..autocal import validate_layout_against_authoritative_positions
 from ..ingest import (
     DEFAULT_Q_NS2,
     DRONE_CLOCK_MODE,
@@ -125,6 +126,7 @@ class EngineState:
         self.stats: Dict[str, Any] = {}
         self.clock_params: Dict[str, Dict[str, float]] = {}
         self.radio_schedule: Dict[str, Any] = default_radio_schedule()
+        self.layout_validation: Dict[str, Any] = {}
         self.source_mode = getattr(config, "INGEST_MODE", "legacy_udp")
         self.serial_assembler = DroneSerialEpochAssembler(radio_schedule=self.radio_schedule)
         self.log_manager = LogManager(root=_resolve_path(getattr(config, "LOG_ROOT", "engine/logs"), DEFAULT_LOG_ROOT))
@@ -253,6 +255,8 @@ def load_calibration() -> None:
             if isinstance(clocks, list):
                 STATE.update_clock_params(clocks)
             STATE.update_radio_schedule(data.get("radio_schedule"))
+            if isinstance(data.get("layout_validation"), dict):
+                STATE.layout_validation = data["layout_validation"]
             return
         except Exception:
             pass
@@ -265,6 +269,7 @@ def load_calibration() -> None:
     STATE.clock_params = {}
     STATE.update_radio_schedule(None)
     STATE.update_dimension_from_anchors()
+    STATE.layout_validation = {}
 
 
 def save_calibration(payload: Dict[str, Any]) -> None:
@@ -274,6 +279,7 @@ def save_calibration(payload: Dict[str, Any]) -> None:
         "anchors": payload.get("anchors", []),
         "anchor_clocks": payload.get("anchor_clocks", []),
         "radio_schedule": apply_radio_schedule_defaults(payload.get("radio_schedule")),
+        "layout_validation": payload.get("layout_validation"),
         "frame": payload.get("frame"),
         "map_id": payload.get("map_id"),
         "updated_at": time.time(),
@@ -580,6 +586,7 @@ async def healthz():
         "anchors": list(STATE.anchors.keys()),
         "clock": STATE.clock_params,
         "radio_schedule": STATE.radio_schedule,
+        "layout_validation": STATE.layout_validation,
         "source_mode": STATE.source_mode,
         "ingest": STATE.health_ingest_snapshot(),
         "logging": STATE.log_manager.is_active(),
@@ -606,7 +613,12 @@ async def get_anchors():
         }
         for key, val in STATE.clock_params.items()
     ]
-    return {"anchors": anchors, "anchor_clocks": clocks, "radio_schedule": STATE.radio_schedule}
+    return {
+        "anchors": anchors,
+        "anchor_clocks": clocks,
+        "radio_schedule": STATE.radio_schedule,
+        "layout_validation": STATE.layout_validation,
+    }
 
 
 @app.post("/set_anchors")
@@ -652,17 +664,55 @@ async def set_anchors(payload: Dict[str, Any] = Body(...)):
     radio_schedule_payload = payload.get("radio_schedule") if radio_schedule_provided else dict(STATE.radio_schedule)
     if radio_schedule_provided:
         STATE.update_radio_schedule(radio_schedule_payload)
+    layout_validation = dict(STATE.layout_validation)
+    twr_edges = payload.get("twr_edges") or payload.get("edges")
+    if twr_edges is not None:
+        if not isinstance(twr_edges, list):
+            raise HTTPException(status_code=400, detail="twr_edges must be a list")
+        layout_validation = validate_layout_against_authoritative_positions(
+            twr_edges,
+            anchors_payload,
+            warn_threshold_m=float(payload.get("warn_threshold_m", 0.25)),
+        )
+        STATE.layout_validation = layout_validation
+    elif payload.get("clear_layout_validation"):
+        layout_validation = {}
+        STATE.layout_validation = {}
     STATE.reset_filter()
     save_calibration(
         {
             "anchors": anchors_payload,
             "anchor_clocks": persisted_clocks,
             "radio_schedule": radio_schedule_payload,
+            "layout_validation": layout_validation,
             "frame": payload.get("frame"),
             "map_id": payload.get("map_id"),
         }
     )
-    return {"ok": True, "count": len(anchors)}
+    return {"ok": True, "count": len(anchors), "layout_validation": layout_validation}
+
+
+@app.post("/validate_anchor_layout")
+async def validate_anchor_layout(payload: Dict[str, Any] = Body(...)):
+    twr_edges = payload.get("twr_edges") or payload.get("edges")
+    if not isinstance(twr_edges, list) or not twr_edges:
+        raise HTTPException(status_code=400, detail="twr_edges must be a non-empty list")
+    if not STATE.anchors:
+        raise HTTPException(status_code=400, detail="no authoritative anchors configured")
+    anchors_payload = [
+        {
+            "id": key,
+            "pos": {"x": float(val[0]), "y": float(val[1]), "z": float(val[2])},
+        }
+        for key, val in STATE.anchors.items()
+    ]
+    validation = validate_layout_against_authoritative_positions(
+        twr_edges,
+        anchors_payload,
+        warn_threshold_m=float(payload.get("warn_threshold_m", 0.25)),
+    )
+    STATE.layout_validation = validation
+    return {"ok": True, "layout_validation": validation}
 
 
 @app.post("/start_log")

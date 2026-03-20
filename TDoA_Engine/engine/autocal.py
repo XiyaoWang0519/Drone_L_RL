@@ -137,6 +137,13 @@ def estimate_layout_from_twr(edges: List[Dict[str, Any]], dims: int = 3) -> Dict
 
 def estimate_clock_params(measurements: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Estimate per-anchor clock offset/drift from sync measurements."""
+    return estimate_clock_params_with_delay(measurements, {})
+
+
+def estimate_clock_params_with_delay(
+    measurements: List[Dict[str, Any]], delay_by_anchor: Dict[str, float]
+) -> Dict[str, Any]:
+    """Estimate per-anchor clock offset/drift after subtracting path delay."""
     if not measurements:
         return {"clocks": [], "quality": {"status": "no_measurements"}}
     grouped: Dict[str, List[Tuple[float, float]]] = defaultdict(list)
@@ -148,7 +155,8 @@ def estimate_clock_params(measurements: List[Dict[str, Any]]) -> Dict[str, Any]:
         t_ref = meas.get("t_ref") or meas.get("t_master") or meas.get("t_global")
         if t_anchor is None or t_ref is None:
             continue
-        grouped[str(anchor_id)].append((float(t_ref), float(t_anchor)))
+        delay = float(delay_by_anchor.get(str(anchor_id), meas.get("path_delay", 0.0) or 0.0))
+        grouped[str(anchor_id)].append((float(t_ref), float(t_anchor) - delay))
     if not grouped:
         return {"clocks": [], "quality": {"status": "insufficient_data"}}
     clocks_out: List[Dict[str, Any]] = []
@@ -180,6 +188,7 @@ def estimate_clock_params(measurements: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "id": anchor_id,
                 "offset_ns": float(offset_ns),
                 "drift_ppm": float(drift_ppm),
+                "path_delay_ns": float(delay_by_anchor.get(anchor_id, 0.0) * 1e9),
                 "valid": True,
             }
         )
@@ -190,3 +199,119 @@ def estimate_clock_params(measurements: List[Dict[str, Any]]) -> Dict[str, Any]:
         "quality": {"status": "ok", "rms_ns": rms_ns, "count": len(clocks_out)},
     }
 
+
+def estimate_ds_twr_path_delay(exchanges: List[Dict[str, Any]], tick_hz: float | None = None) -> Dict[str, Any]:
+    """Estimate one-way path delay from DS-TWR exchanges.
+
+    Timestamps may be in any consistent unit. If ``tick_hz`` is provided, the
+    result also includes nanoseconds and distance in meters.
+    """
+    if not exchanges:
+        return {"path_delay": None, "quality": {"status": "no_exchanges"}}
+
+    delays = []
+    for ex in exchanges:
+        poll_tx = ex.get("poll_tx") or ex.get("t1")
+        resp_rx = ex.get("resp_rx") or ex.get("t4")
+        final_tx = ex.get("final_tx") or ex.get("t5")
+        poll_rx = ex.get("poll_rx") or ex.get("t2")
+        resp_tx = ex.get("resp_tx") or ex.get("t3")
+        final_rx = ex.get("final_rx") or ex.get("t6")
+        if None in (poll_tx, resp_rx, final_tx, poll_rx, resp_tx, final_rx):
+            continue
+
+        ra = float(resp_rx) - float(poll_tx)
+        rb = float(final_rx) - float(resp_tx)
+        da = float(final_tx) - float(resp_rx)
+        db = float(resp_tx) - float(poll_rx)
+        denom = ra + rb + da + db
+        if denom <= 0.0:
+            continue
+        tof = (ra * rb - da * db) / denom
+        if tof <= 0.0:
+            continue
+        delays.append(float(tof))
+
+    if not delays:
+        return {"path_delay": None, "quality": {"status": "invalid_exchanges"}}
+
+    arr = np.array(delays, dtype=float)
+    median = float(np.median(arr))
+    mad = float(np.median(np.abs(arr - median))) if arr.size > 1 else 0.0
+    result: Dict[str, Any] = {
+        "path_delay": median,
+        "quality": {"status": "ok", "samples": int(arr.size), "mad": mad},
+    }
+    if tick_hz:
+        result["path_delay_ns"] = float(median * 1e9 / tick_hz)
+        result["distance_m"] = float(median * C_AIR / tick_hz)
+        result["quality"]["mad_ns"] = float(mad * 1e9 / tick_hz)
+    return result
+
+
+def validate_layout_against_authoritative_positions(
+    edges: List[Dict[str, Any]], anchors: List[Dict[str, Any]] | Dict[str, Dict[str, float]], warn_threshold_m: float = 0.25
+) -> Dict[str, Any]:
+    """Compare measured TWR edges against authoritative anchor coordinates."""
+    if isinstance(anchors, dict):
+        anchor_map = {
+            str(anchor_id): np.array(
+                [float(pos["x"]), float(pos["y"]), float(pos.get("z", 0.0))], dtype=float
+            )
+            for anchor_id, pos in anchors.items()
+        }
+    else:
+        anchor_map = {
+            str(anchor["id"]): np.array(
+                [
+                    float(anchor["pos"]["x"]),
+                    float(anchor["pos"]["y"]),
+                    float(anchor["pos"].get("z", 0.0)),
+                ],
+                dtype=float,
+            )
+            for anchor in anchors
+            if "id" in anchor and "pos" in anchor
+        }
+    if not anchor_map:
+        return {"edges": [], "quality": {"status": "no_anchors"}}
+
+    comparisons = []
+    residuals = []
+    for edge in edges:
+        try:
+            a, b = _extract_anchor_pair(edge)
+            if a not in anchor_map or b not in anchor_map:
+                continue
+            measured = _edge_distance(edge)
+        except ValueError:
+            continue
+        predicted = float(np.linalg.norm(anchor_map[a] - anchor_map[b]))
+        residual = predicted - measured
+        residuals.append(residual)
+        comparisons.append(
+            {
+                "a": a,
+                "b": b,
+                "measured_m": float(measured),
+                "predicted_m": predicted,
+                "residual_m": float(residual),
+            }
+        )
+
+    if not comparisons:
+        return {"edges": [], "quality": {"status": "no_comparable_edges"}}
+
+    residuals_arr = np.array(residuals, dtype=float)
+    rms = float(np.sqrt(np.mean(residuals_arr**2)))
+    max_abs = float(np.max(np.abs(residuals_arr)))
+    return {
+        "edges": comparisons,
+        "quality": {
+            "status": "mismatch" if max_abs > warn_threshold_m else "ok",
+            "rms_m": rms,
+            "max_abs_m": max_abs,
+            "warn_threshold_m": float(warn_threshold_m),
+            "count": len(comparisons),
+        },
+    }

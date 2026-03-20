@@ -7,6 +7,19 @@
         zephyr,console = &cdc_acm_uart0;
         zephyr,shell-uart = &cdc_acm_uart0;
     };
+
+    leds {
+        compatible = "gpio-leds";
+
+        d12_led: led0 {
+            gpios = <&gpio0 14 GPIO_ACTIVE_LOW>;
+            label = "DWM3001CDK D12";
+        };
+    };
+
+    aliases {
+        led0 = &d12_led;
+    };
 };
 
 &usbd { status = "okay"; };

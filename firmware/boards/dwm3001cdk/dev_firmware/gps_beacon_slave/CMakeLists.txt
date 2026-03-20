@@ -18,7 +18,7 @@ target_include_directories(app PRIVATE
 )
 
 target_sources(app PRIVATE
-  src/main.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/../gps_beacon/src/main.c
   ${CMAKE_CURRENT_SOURCE_DIR}/../uwb_chipid/src/dw3000_port.c
   ${CMAKE_CURRENT_SOURCE_DIR}/../uwb_chipid/src/deca_probe_interface_zephyr.c
   ${CMAKE_CURRENT_SOURCE_DIR}/../uwb_chipid/src/deca_rsl_stub.c
