@@ -76,6 +76,7 @@ void dw_port_reset_deassert(void);
 
 #define MAX_DISCOVERED_SLAVES 8
 #define MAX_TWR_SAMPLE_STORAGE 16
+#define MAX_GEOMETRY_EDGES (((MAX_DISCOVERED_SLAVES + 1U) * MAX_DISCOVERED_SLAVES) / 2U)
 #define LED_THREAD_STACK_SIZE 768
 #define LED_THREAD_PRIORITY 7
 #define UWB_ISR_STACK_SIZE 1536
@@ -186,6 +187,15 @@ struct discovered_slave {
     uint32_t distance_mm;
 };
 
+struct geometry_edge {
+    uint8_t a_id;
+    uint8_t b_id;
+    struct twr_samples twr;
+    bool valid;
+    int64_t path_delay_ticks;
+    uint32_t distance_mm;
+};
+
 struct slave_runtime {
     uint8_t state;
     struct sync_model sync;
@@ -224,6 +234,7 @@ K_THREAD_STACK_DEFINE(led_stack, LED_THREAD_STACK_SIZE);
 static struct nvs_fs cal_fs;
 static bool cal_store_ready;
 static struct slave_runtime slave_runtime;
+static struct geometry_edge geometry_edges_scratch[MAX_GEOMETRY_EDGES];
 
 static inline uint64_t ts5_to_u64(const uint8_t ts[5])
 {
@@ -453,6 +464,89 @@ static uint16_t median_u16(const uint16_t *values, size_t count)
     memcpy(scratch, values, count * sizeof(scratch[0]));
     sample_sort_u16(scratch, count);
     return scratch[count / 2U];
+}
+
+static struct geometry_edge *find_or_add_geometry_edge(struct geometry_edge *edges,
+                                                       size_t *count,
+                                                       uint8_t a_id, uint8_t b_id)
+{
+    uint8_t lo = MIN(a_id, b_id);
+    uint8_t hi = MAX(a_id, b_id);
+
+    for (size_t i = 0; i < *count; ++i) {
+        if (edges[i].a_id == lo && edges[i].b_id == hi) {
+            return &edges[i];
+        }
+    }
+
+    if (*count >= MAX_GEOMETRY_EDGES) {
+        return NULL;
+    }
+
+    struct geometry_edge *edge = &edges[*count];
+    memset(edge, 0, sizeof(*edge));
+    edge->a_id = lo;
+    edge->b_id = hi;
+    (*count)++;
+    return edge;
+}
+
+static void geometry_edge_append_sample(struct geometry_edge *edge,
+                                        int64_t path_delay_ticks,
+                                        uint16_t distance_mm)
+{
+    if (edge->twr.count < ARRAY_SIZE(edge->twr.path_delay_ticks)) {
+        edge->twr.path_delay_ticks[edge->twr.count] = path_delay_ticks;
+        edge->twr.distance_mm[edge->twr.count] = distance_mm;
+        edge->twr.count++;
+    } else {
+        memmove(&edge->twr.path_delay_ticks[0], &edge->twr.path_delay_ticks[1],
+                (ARRAY_SIZE(edge->twr.path_delay_ticks) - 1U) * sizeof(edge->twr.path_delay_ticks[0]));
+        memmove(&edge->twr.distance_mm[0], &edge->twr.distance_mm[1],
+                (ARRAY_SIZE(edge->twr.distance_mm) - 1U) * sizeof(edge->twr.distance_mm[0]));
+        edge->twr.path_delay_ticks[ARRAY_SIZE(edge->twr.path_delay_ticks) - 1U] = path_delay_ticks;
+        edge->twr.distance_mm[ARRAY_SIZE(edge->twr.distance_mm) - 1U] = distance_mm;
+    }
+    edge->path_delay_ticks = median_i64(edge->twr.path_delay_ticks, edge->twr.count);
+    edge->distance_mm = median_u16(edge->twr.distance_mm, edge->twr.count);
+    edge->valid = edge->twr.count >= CAL_TWR_MIN_VALID_SAMPLES;
+}
+
+static size_t geometry_expected_edge_count(size_t anchor_count)
+{
+    if (anchor_count < 2U) {
+        return 0U;
+    }
+    return (anchor_count * (anchor_count - 1U)) / 2U;
+}
+
+static size_t geometry_count_valid_edges(const struct geometry_edge *edges, size_t count)
+{
+    size_t valid = 0U;
+
+    for (size_t i = 0; i < count; ++i) {
+        if (edges[i].valid) {
+            valid++;
+        }
+    }
+
+    return valid;
+}
+
+static uint8_t geometry_status_from_edges(size_t anchor_count, size_t valid_edges)
+{
+    size_t expected = geometry_expected_edge_count(anchor_count);
+
+    if (expected == 0U) {
+        return UWB_GEOM_STATUS_FAILED;
+    }
+    if (valid_edges >= expected) {
+        return UWB_GEOM_STATUS_OK;
+    }
+    if (valid_edges > 0U) {
+        return UWB_GEOM_STATUS_PARTIAL;
+    }
+    return UWB_GEOM_STATUS_FAILED;
 }
 
 static uint32_t ticks_to_distance_mm(int64_t ticks)
@@ -1078,25 +1172,40 @@ static bool wait_for_matching_cal_frame(uint8_t msg_type, uint8_t src_id, uint8_
             if (result == RX_WAIT_TIMEOUT) {
                 return false;
             }
+            if (k_uptime_get() < deadline && !arm_immediate_rx(CAL_RX_TIMEOUT_UUS)) {
+                return false;
+            }
             continue;
         }
 
         struct uwb_cal_frame frame;
         if (!uwb_cal_unpack(rx_buf, rx_len, &frame)) {
             dwt_forcetrxoff();
+            if (k_uptime_get() < deadline && !arm_immediate_rx(CAL_RX_TIMEOUT_UUS)) {
+                return false;
+            }
             continue;
         }
 
         if (frame.msg_type != msg_type || frame.seq != seq) {
             dwt_forcetrxoff();
+            if (k_uptime_get() < deadline && !arm_immediate_rx(CAL_RX_TIMEOUT_UUS)) {
+                return false;
+            }
             continue;
         }
         if (src_id != UWB_BROADCAST_ID && frame.src_id != src_id) {
             dwt_forcetrxoff();
+            if (k_uptime_get() < deadline && !arm_immediate_rx(CAL_RX_TIMEOUT_UUS)) {
+                return false;
+            }
             continue;
         }
         if (dst_id != UWB_BROADCAST_ID && frame.dst_id != dst_id) {
             dwt_forcetrxoff();
+            if (k_uptime_get() < deadline && !arm_immediate_rx(CAL_RX_TIMEOUT_UUS)) {
+                return false;
+            }
             continue;
         }
 
@@ -1124,6 +1233,87 @@ static bool receive_matching_cal_frame(uint8_t msg_type, uint8_t src_id, uint8_t
     }
     return wait_for_matching_cal_frame(msg_type, src_id, dst_id, seq,
                                        timeout_ms, matched, matched_rx_ts);
+}
+
+static bool start_delayed_tx(const uint8_t *tx_buf, size_t len, uint32_t dx_time,
+                             const char *tag, uint16_t seq,
+                             uint32_t *tx_ok, uint32_t *tx_late, uint32_t *tx_timeout,
+                             uint8_t tx_mode, uint32_t rx_after_tx_delay_uus,
+                             uint32_t rx_after_tx_timeout_uus);
+
+static bool send_cal_frame_after_uus(const struct uwb_cal_frame *frame, uint32_t delay_uus,
+                                     const char *tag, uint32_t *tx_ok,
+                                     uint32_t *tx_late, uint32_t *tx_timeout,
+                                     uint8_t tx_mode,
+                                     uint32_t rx_after_tx_delay_uus,
+                                     uint32_t rx_after_tx_timeout_uus);
+
+static bool run_geometry_pair_initiator(uint8_t initiator_id, uint8_t responder_id,
+                                        uint8_t initiator_slot_id,
+                                        uint16_t seq, uint8_t sample_idx,
+                                        uint32_t roster_hash,
+                                        uint32_t *tx_ok, uint32_t *tx_late,
+                                        uint32_t *tx_timeout,
+                                        struct uwb_cal_frame *matched_report)
+{
+    struct uwb_cal_frame poll = {
+        .frame_type = UWB_FRAME_TYPE_CAL,
+        .msg_type = UWB_CAL_MSG_TWR_POLL,
+        .src_id = initiator_id,
+        .dst_id = responder_id,
+        .seq = seq,
+        .slot_id = sample_idx,
+        .flags = UWB_CAL_FLAG_GEOMETRY,
+        .value16 = initiator_slot_id,
+        .ts_a = roster_hash,
+        .ts_b = 0U,
+        .ts_c = 0U,
+    };
+
+    if (!send_cal_frame_after_uus(&poll, CAL_CONTROL_TX_DELAY_UUS, "CAL_PAIR_POLL",
+                                  tx_ok, tx_late, tx_timeout,
+                                  DWT_START_TX_DELAYED, 0U, 0U)) {
+        return false;
+    }
+
+    struct uwb_cal_frame resp;
+    uint64_t resp_rx_ts = 0U;
+    if (!receive_matching_cal_frame(UWB_CAL_MSG_TWR_RESP, responder_id, initiator_id,
+                                    seq, CAL_WAIT_MS, &resp, &resp_rx_ts)) {
+        return false;
+    }
+
+    uint32_t final_tx_time =
+        (uint32_t)((resp_rx_ts +
+                   ((uint64_t)CAL_RESP_RX_TO_FINAL_TX_DLY_UUS * UUS_TO_DWT_TIME)) >> 8);
+    final_tx_time = guard_tx_time(final_tx_time, get_sys_time_u32(),
+                                  uus_to_dx_time(TX_GUARD_UUS), 0U);
+    uint64_t final_tx_ts = (((uint64_t)(final_tx_time & 0xFFFFFFFEUL)) << 8);
+    struct uwb_cal_frame final = {
+        .frame_type = UWB_FRAME_TYPE_CAL,
+        .msg_type = UWB_CAL_MSG_TWR_FINAL,
+        .src_id = initiator_id,
+        .dst_id = responder_id,
+        .seq = seq,
+        .slot_id = sample_idx,
+        .flags = UWB_CAL_FLAG_GEOMETRY,
+        .value16 = initiator_slot_id,
+        .ts_a = last_tx_ts,
+        .ts_b = resp_rx_ts,
+        .ts_c = final_tx_ts,
+    };
+    uint8_t final_buf[UWB_CAL_FRAME_LEN];
+    uwb_cal_pack(final_buf, &final);
+
+    if (!start_delayed_tx(final_buf, sizeof(final_buf),
+                          quantize_delayed_time(final_tx_time),
+                          "CAL_PAIR_FINAL", seq, tx_ok, tx_late, tx_timeout,
+                          DWT_START_TX_DELAYED, 0U, 0U)) {
+        return false;
+    }
+
+    return receive_matching_cal_frame(UWB_CAL_MSG_PAIR_REPORT, initiator_id, responder_id,
+                                      seq, CAL_WAIT_MS * 2U, matched_report, NULL);
 }
 
 #if defined(CONFIG_ROLE_SLAVE_ANCHOR)
@@ -1445,9 +1635,36 @@ static void send_twr_report(const struct slave_runtime *runtime, uint8_t master_
                                    DWT_START_TX_DELAYED, 0U, 0U);
 }
 
+static void send_pair_report(uint8_t initiator_id, uint8_t responder_id,
+                             uint16_t seq, uint8_t sample_idx,
+                             uint32_t roster_hash, int64_t path_delay_ticks,
+                             uint16_t distance_mm, bool valid,
+                             uint32_t *tx_ok, uint32_t *tx_late, uint32_t *tx_timeout)
+{
+    struct uwb_cal_frame report = {
+        .frame_type = UWB_FRAME_TYPE_CAL,
+        .msg_type = UWB_CAL_MSG_PAIR_REPORT,
+        .src_id = initiator_id,
+        .dst_id = responder_id,
+        .seq = seq,
+        .slot_id = sample_idx,
+        .flags = valid ? 1U : 0U,
+        .value16 = distance_mm,
+        .ts_a = (uint64_t)path_delay_ticks,
+        .ts_b = roster_hash,
+        .ts_c = 0U,
+    };
+
+    (void)send_cal_frame_after_uus(&report, CAL_CONTROL_TX_DELAY_UUS, "CAL_PAIR_REP",
+                                   tx_ok, tx_late, tx_timeout,
+                                   DWT_START_TX_DELAYED, 0U, 0U);
+}
+
 static bool handle_slave_twr_poll(struct slave_runtime *runtime, const struct uwb_cal_frame *poll_frame,
                                   uint32_t *tx_ok, uint32_t *tx_late, uint32_t *tx_timeout)
 {
+    bool geometry_mode = (poll_frame->flags & UWB_CAL_FLAG_GEOMETRY) != 0U;
+
     if (poll_frame->dst_id != BEACON_ID) {
         return false;
     }
@@ -1498,6 +1715,14 @@ static bool handle_slave_twr_poll(struct slave_runtime *runtime, const struct uw
         return false;
     }
 
+    if (geometry_mode) {
+        send_pair_report(poll_frame->src_id, BEACON_ID, poll_frame->seq, poll_frame->slot_id,
+                         (uint32_t)poll_frame->ts_a, tof_ticks,
+                         (uint16_t)ticks_to_distance_mm(tof_ticks), true,
+                         tx_ok, tx_late, tx_timeout);
+        return true;
+    }
+
     twr_samples_append(&runtime->twr, tof_ticks, (uint16_t)ticks_to_distance_mm(tof_ticks));
     refresh_timing_from_samples(runtime);
     runtime->timing.master_id = poll_frame->src_id;
@@ -1508,6 +1733,34 @@ static bool handle_slave_twr_poll(struct slave_runtime *runtime, const struct uw
     send_twr_report(runtime, poll_frame->src_id, poll_frame->seq,
                     tx_ok, tx_late, tx_timeout);
     return true;
+}
+
+static bool handle_slave_pair_plan(struct slave_runtime *runtime, const struct uwb_cal_frame *plan_frame,
+                                   uint32_t *tx_ok, uint32_t *tx_late, uint32_t *tx_timeout)
+{
+    struct uwb_cal_frame report;
+    bool ok;
+
+    if (plan_frame->src_id != BEACON_ID || plan_frame->dst_id == BEACON_ID) {
+        return false;
+    }
+
+    runtime->state = UWB_ANCHOR_STATE_TWR_GRAPH;
+    on_state_change(runtime->state);
+    ok = run_geometry_pair_initiator(BEACON_ID, plan_frame->dst_id, BEACON_SLOT_ID,
+                                     plan_frame->seq, plan_frame->slot_id,
+                                     (uint32_t)plan_frame->ts_a,
+                                     tx_ok, tx_late, tx_timeout, &report);
+    if (ok) {
+        printk("CAL: pair a=%u b=%u sample=%u path=%lld ticks dist=%u valid=%u\n",
+               report.src_id,
+               report.dst_id,
+               report.slot_id,
+               (long long)report.ts_a,
+               report.value16,
+               (report.flags & 0x01U) ? 1U : 0U);
+    }
+    return ok;
 }
 
 static void slave_run_localization(struct slave_runtime *runtime)
@@ -1836,7 +2089,11 @@ static void slave_wait_for_network(struct slave_runtime *runtime)
             continue;
         }
 
-        if (cal.dst_id != UWB_BROADCAST_ID && cal.dst_id != BEACON_ID) {
+        if (cal.msg_type == UWB_CAL_MSG_PAIR_PLAN) {
+            if (cal.src_id != BEACON_ID && cal.dst_id != BEACON_ID) {
+                continue;
+            }
+        } else if (cal.dst_id != UWB_BROADCAST_ID && cal.dst_id != BEACON_ID) {
             continue;
         }
 
@@ -1852,6 +2109,9 @@ static void slave_wait_for_network(struct slave_runtime *runtime)
             runtime->master_id = cal.src_id;
             runtime->timing.master_id = cal.src_id;
             (void)handle_slave_twr_poll(runtime, &cal, &tx_ok, &tx_late, &tx_timeout);
+            break;
+        case UWB_CAL_MSG_PAIR_PLAN:
+            (void)handle_slave_pair_plan(runtime, &cal, &tx_ok, &tx_late, &tx_timeout);
             break;
         case UWB_CAL_MSG_STATUS_REQ:
             if (runtime->timing.path_delay_valid && runtime->sync.sample_count >= CAL_SYNC_SAMPLES) {
@@ -1930,7 +2190,10 @@ static void collect_hello_responses(struct discovered_slave *slaves, size_t *cou
         }
         entry->hello_seen = true;
         entry->slot_id = hello.slot_id;
-        printk("CAL: hello from slave=%u slot=%u\n", hello.src_id, hello.slot_id);
+
+        if (CAL_EXPECTED_SLAVES > 0U && *count >= CAL_EXPECTED_SLAVES) {
+            break;
+        }
     }
 }
 
@@ -1964,11 +2227,193 @@ static size_t master_discover_slaves(struct discovered_slave *slaves, uint16_t *
         }
 
         collect_hello_responses(slaves, &count, seq);
+        if (CAL_EXPECTED_SLAVES > 0U && count >= CAL_EXPECTED_SLAVES) {
+            break;
+        }
         k_msleep(10);
     }
 
+    for (size_t i = 0; i < count; ++i) {
+        printk("CAL: hello from slave=%u slot=%u\n", slaves[i].beacon_id, slaves[i].slot_id);
+    }
     printk("CAL: discovered %u slave(s)\n", (unsigned int)count);
     return count;
+}
+
+static void master_broadcast_pair_plan(uint8_t initiator_id, uint8_t responder_id,
+                                       uint8_t sample_idx, uint32_t roster_hash,
+                                       uint16_t *cal_seq)
+{
+    uint32_t tx_ok = 0U;
+    uint32_t tx_late = 0U;
+    uint32_t tx_timeout = 0U;
+    struct uwb_cal_frame plan = {
+        .frame_type = UWB_FRAME_TYPE_CAL,
+        .msg_type = UWB_CAL_MSG_PAIR_PLAN,
+        .src_id = initiator_id,
+        .dst_id = responder_id,
+        .seq = ++(*cal_seq),
+        .slot_id = sample_idx,
+        .flags = 0U,
+        .value16 = 0U,
+        .ts_a = roster_hash,
+        .ts_b = 0U,
+        .ts_c = 0U,
+    };
+
+    (void)send_cal_frame_after_uus(&plan, CAL_CONTROL_TX_DELAY_UUS, "CAL_PAIR_PLAN",
+                                   &tx_ok, &tx_late, &tx_timeout,
+                                   DWT_START_TX_DELAYED, 0U, 0U);
+}
+
+static void master_broadcast_geom_done(uint8_t status_code, uint32_t roster_hash,
+                                       uint16_t edge_count, uint8_t anchor_count,
+                                       uint16_t *cal_seq)
+{
+    uint32_t tx_ok = 0U;
+    uint32_t tx_late = 0U;
+    uint32_t tx_timeout = 0U;
+    struct uwb_cal_frame done = {
+        .frame_type = UWB_FRAME_TYPE_CAL,
+        .msg_type = UWB_CAL_MSG_GEOM_DONE,
+        .src_id = BEACON_ID,
+        .dst_id = UWB_BROADCAST_ID,
+        .seq = ++(*cal_seq),
+        .slot_id = 0U,
+        .flags = status_code,
+        .value16 = edge_count,
+        .ts_a = roster_hash,
+        .ts_b = anchor_count,
+        .ts_c = 0U,
+    };
+
+    (void)send_cal_frame_after_uus(&done, CAL_CONTROL_TX_DELAY_UUS, "CAL_GEOM_DONE",
+                                   &tx_ok, &tx_late, &tx_timeout,
+                                   DWT_START_TX_DELAYED, 0U, 0U);
+}
+
+static struct discovered_slave *master_find_slave(struct discovered_slave *slaves, size_t count,
+                                                  uint8_t beacon_id)
+{
+    for (size_t i = 0; i < count; ++i) {
+        if (slaves[i].beacon_id == beacon_id) {
+            return &slaves[i];
+        }
+    }
+    return NULL;
+}
+
+static bool master_collect_geometry_edge(struct geometry_edge *edges, size_t *edge_count,
+                                         const struct uwb_cal_frame *report)
+{
+    struct geometry_edge *edge;
+
+    if ((report->flags & 0x01U) == 0U) {
+        return false;
+    }
+
+    edge = find_or_add_geometry_edge(edges, edge_count, report->src_id, report->dst_id);
+    if (!edge) {
+        return false;
+    }
+
+    geometry_edge_append_sample(edge, (int64_t)report->ts_a, report->value16);
+    printk("CAL: edge a=%u b=%u sample=%u path=%lld ticks dist=%u valid=%u samples=%u\n",
+           report->src_id,
+           report->dst_id,
+           report->slot_id,
+           (long long)report->ts_a,
+           report->value16,
+           edge->valid ? 1U : 0U,
+           (unsigned int)edge->twr.count);
+    return true;
+}
+
+static bool master_geometry_pair_with_master(uint8_t responder_id, uint8_t sample_idx,
+                                             uint32_t roster_hash,
+                                             uint16_t *cal_seq,
+                                             struct uwb_cal_frame *matched_report)
+{
+    uint32_t tx_ok = 0U;
+    uint32_t tx_late = 0U;
+    uint32_t tx_timeout = 0U;
+    uint16_t seq;
+
+    master_broadcast_pair_plan(BEACON_ID, responder_id, sample_idx, roster_hash, cal_seq);
+    seq = *cal_seq;
+    return run_geometry_pair_initiator(BEACON_ID, responder_id, BEACON_SLOT_ID,
+                                       seq, sample_idx, roster_hash,
+                                       &tx_ok, &tx_late, &tx_timeout, matched_report);
+}
+
+static bool master_geometry_pair_between_slaves(uint8_t initiator_id, uint8_t responder_id,
+                                                uint8_t sample_idx, uint32_t roster_hash,
+                                                uint16_t *cal_seq,
+                                                struct uwb_cal_frame *matched_report)
+{
+    master_broadcast_pair_plan(initiator_id, responder_id, sample_idx, roster_hash, cal_seq);
+    return receive_matching_cal_frame(UWB_CAL_MSG_PAIR_REPORT, initiator_id, responder_id,
+                                      *cal_seq, CAL_WAIT_MS * 2U, matched_report, NULL);
+}
+
+static void master_collect_geometry_graph(struct discovered_slave *slaves, size_t slave_count,
+                                          uint32_t roster_hash, uint16_t *cal_seq)
+{
+    struct geometry_edge *edges = geometry_edges_scratch;
+    size_t edge_count = 0U;
+    uint8_t roster_ids[MAX_DISCOVERED_SLAVES + 1];
+    size_t roster_count = slave_count + 1U;
+
+    memset(edges, 0, sizeof(geometry_edges_scratch));
+    roster_ids[0] = BEACON_ID;
+    for (size_t i = 0; i < slave_count; ++i) {
+        roster_ids[i + 1U] = slaves[i].beacon_id;
+    }
+
+    on_state_change(UWB_ANCHOR_STATE_TWR_GRAPH);
+    for (size_t i = 0; i < roster_count; ++i) {
+        for (size_t j = i + 1U; j < roster_count; ++j) {
+            uint8_t a_id = roster_ids[i];
+            uint8_t b_id = roster_ids[j];
+
+            for (uint8_t sample = 0U; sample < CAL_TWR_ATTEMPTS; ++sample) {
+                struct uwb_cal_frame report;
+                bool ok;
+
+                if (a_id == BEACON_ID) {
+                    struct discovered_slave *responder = master_find_slave(slaves, slave_count, b_id);
+                    if (!responder) {
+                        continue;
+                    }
+                    ARG_UNUSED(responder);
+                    ok = master_geometry_pair_with_master(b_id, sample, roster_hash,
+                                                          cal_seq, &report);
+                } else {
+                    ok = master_geometry_pair_between_slaves(a_id, b_id, sample,
+                                                             roster_hash, cal_seq, &report);
+                }
+
+                if (!ok) {
+                    printk("CAL: pair timeout a=%u b=%u sample=%u seq=%u\n",
+                           a_id, b_id, sample, *cal_seq);
+                    continue;
+                }
+
+                (void)master_collect_geometry_edge(edges, &edge_count, &report);
+                k_msleep(5);
+            }
+        }
+    }
+
+    size_t valid_edges = geometry_count_valid_edges(edges, edge_count);
+    uint8_t status_code = geometry_status_from_edges(roster_count, valid_edges);
+    printk("CAL: geometry edges=%u valid=%u expected=%u status=%u\n",
+           (unsigned int)edge_count,
+           (unsigned int)valid_edges,
+           (unsigned int)geometry_expected_edge_count(roster_count),
+           status_code);
+    master_broadcast_geom_done(status_code, roster_hash, (uint16_t)valid_edges,
+                               (uint8_t)roster_count, cal_seq);
 }
 
 static bool master_range_slave(struct discovered_slave *slave, uint16_t *cal_seq)
@@ -2376,16 +2821,17 @@ static void master_run(void)
     memset(slaves, 0, sizeof(slaves));
 
     slave_count = master_discover_slaves(slaves, &cal_seq);
-    for (size_t i = 0; i < slave_count; ++i) {
-        (void)master_range_slave(&slaves[i], &cal_seq);
-    }
-    ready_count = master_wait_for_slaves_ready(slaves, slave_count, &cal_seq, &sync_seq);
-
     roster_ids[0] = BEACON_ID;
     for (size_t i = 0; i < slave_count; ++i) {
         roster_ids[i + 1U] = slaves[i].beacon_id;
     }
     roster_hash = compute_roster_hash(roster_ids, slave_count + 1U);
+    master_collect_geometry_graph(slaves, slave_count, roster_hash, &cal_seq);
+
+    for (size_t i = 0; i < slave_count; ++i) {
+        (void)master_range_slave(&slaves[i], &cal_seq);
+    }
+    ready_count = master_wait_for_slaves_ready(slaves, slave_count, &cal_seq, &sync_seq);
     signal = master_choose_network_signal(slave_count, ready_count);
 
     if (signal == UWB_NETWORK_SIGNAL_READY) {

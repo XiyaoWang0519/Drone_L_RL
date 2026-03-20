@@ -198,7 +198,7 @@ config UWB_CAL_DISCOVERY_RESP_BASE_UUS
 
 config UWB_CAL_DISCOVERY_RESP_SLOT_UUS
     int "Discovery response slot spacing (UUS)"
-    default 1800
+    default 4000
     range 200 10000
     help
       Additional delay per slot ID for staggered discovery/status responses.
@@ -212,7 +212,7 @@ config UWB_CAL_STATUS_RESP_BASE_UUS
 
 config UWB_CAL_STATUS_RESP_SLOT_UUS
     int "Status response slot spacing (UUS)"
-    default 1800
+    default 4000
     range 200 10000
     help
       Additional delay per slot ID for staggered status responses.

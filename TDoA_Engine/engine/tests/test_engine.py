@@ -163,6 +163,30 @@ class TestAutocal(unittest.TestCase):
         self.assertEqual(validation["quality"]["status"], "ok")
         self.assertLess(validation["quality"]["rms_m"], 1e-6)
 
+    def test_layout_canonicalization_is_deterministic_in_3d(self):
+        edges = [
+            {"a": "A1", "b": "A2", "dist_m": 2.0},
+            {"a": "A1", "b": "A3", "dist_m": math.sqrt(5.0)},
+            {"a": "A1", "b": "A4", "dist_m": math.sqrt(3.0)},
+            {"a": "A2", "b": "A3", "dist_m": math.sqrt(5.0)},
+            {"a": "A2", "b": "A4", "dist_m": math.sqrt(3.0)},
+            {"a": "A3", "b": "A4", "dist_m": math.sqrt(2.0)},
+        ]
+
+        result = estimate_layout_from_twr(edges, dims=3)
+        anchors = {anchor["id"]: anchor["pos"] for anchor in result["anchors"]}
+
+        self.assertEqual(result["quality"]["status"], "ok")
+        self.assertAlmostEqual(anchors["A1"]["x"], 0.0, places=6)
+        self.assertAlmostEqual(anchors["A1"]["y"], 0.0, places=6)
+        self.assertAlmostEqual(anchors["A1"]["z"], 0.0, places=6)
+        self.assertGreater(anchors["A2"]["x"], 0.0)
+        self.assertAlmostEqual(anchors["A2"]["y"], 0.0, places=6)
+        self.assertAlmostEqual(anchors["A2"]["z"], 0.0, places=6)
+        self.assertGreater(anchors["A3"]["y"], 0.0)
+        self.assertAlmostEqual(anchors["A3"]["z"], 0.0, places=6)
+        self.assertGreaterEqual(anchors["A4"]["z"], 0.0)
+
 
 class TestDroneConsoleParser(unittest.TestCase):
     def test_parse_sync_line(self):
@@ -191,6 +215,33 @@ class TestDroneConsoleParser(unittest.TestCase):
     def test_unknown_line(self):
         parsed = parse_drone_console_line("hello from elsewhere")
         self.assertEqual(parsed["type"], "unknown")
+
+    def test_parse_cal_edge_line(self):
+        parsed = parse_drone_console_line(
+            "DRONE: CAL_EDGE a=A1 b=A3 sample=2 dist_m=1.234 valid=1 path_ticks=567 seq=99 roster_hash=42 ok=7"
+        )
+        self.assertEqual(parsed["type"], "cal_edge")
+        event = parsed["event"]
+        self.assertEqual(event.anchor_a, "A1")
+        self.assertEqual(event.anchor_b, "A3")
+        self.assertEqual(event.sample_idx, 2)
+        self.assertAlmostEqual(event.dist_m, 1.234, places=3)
+        self.assertTrue(event.valid)
+        self.assertEqual(event.path_ticks, 567)
+        self.assertEqual(event.seq, 99)
+        self.assertEqual(event.roster_hash, 42)
+
+    def test_parse_cal_graph_line(self):
+        parsed = parse_drone_console_line(
+            "DRONE: CAL_GRAPH status=ok roster_hash=42 edges=6 anchors=4 seq=100 ok=9"
+        )
+        self.assertEqual(parsed["type"], "cal_graph")
+        event = parsed["event"]
+        self.assertEqual(event.status, "ok")
+        self.assertEqual(event.roster_hash, 42)
+        self.assertEqual(event.edge_count, 6)
+        self.assertEqual(event.anchor_count, 4)
+        self.assertEqual(event.seq, 100)
 
 
 class TestTimestampUnwrapper(unittest.TestCase):
@@ -265,6 +316,32 @@ class TestDroneSerialAssembler(unittest.TestCase):
         self.assertEqual(outputs, [])
         self.assertEqual(self.assembler.snapshot()["partial_epochs"], 1)
 
+    def test_negative_toa_measurements_are_retained(self):
+        sync_seq = 20
+        t1_sync = 6_000_000_000
+        beta = 300
+        next_t1 = t1_sync + self.superframe_ticks
+        next_t2 = next_t1 + beta
+
+        outputs = self.assembler.ingest_line(f"DRONE: SYNC master=1 seq={sync_seq} t1={t1_sync} ts={t1_sync + beta} ok=1")
+        self.assertEqual(outputs, [])
+
+        toa_ticks = {1: -900.0, 2: 100.0, 3: 700.0}
+        for beacon_id, slot_id in ((1, 0), (2, 1), (3, 2)):
+            rx_ts = t1_sync + self._slot_offset(slot_id) + beta + toa_ticks[beacon_id]
+            self.assembler.ingest_line(
+                f"DRONE: BLINK id={beacon_id} seq={sync_seq} slot={slot_id} flags=0 ts={int(rx_ts)} ok=1"
+            )
+
+        outputs = self.assembler.ingest_line(
+            f"DRONE: SYNC master=1 seq={sync_seq + 1} t1={next_t1} ts={next_t2} ok=2"
+        )
+        self.assertEqual(len(outputs), 1)
+        obs = {anchor["id"]: anchor["t_obs_ticks"] for anchor in outputs[0]["anchors"]}
+        self.assertLess(obs["A1"], 0.0)
+        self.assertAlmostEqual(obs["A2"], toa_ticks[2], places=3)
+        self.assertAlmostEqual(obs["A3"], toa_ticks[3], places=3)
+
     def test_out_of_order_sync_is_ignored(self):
         self.assembler.ingest_line("DRONE: SYNC master=1 seq=5 t1=100 ts=120 ok=1")
         outputs = self.assembler.ingest_line("DRONE: SYNC master=1 seq=4 t1=50 ts=70 ok=1")
@@ -319,6 +396,25 @@ class TestDroneSerialAssembler(unittest.TestCase):
         snapshot = self.assembler.snapshot()
         self.assertEqual(snapshot["out_of_order_lines"], 0)
         self.assertEqual(snapshot["last_superframe_seq"], 5)
+
+    def test_geometry_sessions_are_buffered_until_graph_done(self):
+        self.assembler.ingest_line(
+            "DRONE: CAL_EDGE a=A1 b=A2 sample=0 dist_m=2.000 valid=1 path_ticks=100 seq=11 roster_hash=42 ok=1"
+        )
+        self.assembler.ingest_line(
+            "DRONE: CAL_EDGE a=A1 b=A2 sample=1 dist_m=2.010 valid=1 path_ticks=101 seq=12 roster_hash=42 ok=2"
+        )
+
+        self.assertEqual(self.assembler.drain_geometry_sessions(), [])
+
+        self.assembler.ingest_line(
+            "DRONE: CAL_GRAPH status=ok roster_hash=42 edges=6 anchors=4 seq=13 ok=3"
+        )
+        sessions = self.assembler.drain_geometry_sessions()
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["roster_hash"], 42)
+        self.assertEqual(sessions[0]["graph_seq"], 13)
+        self.assertEqual(len(sessions[0]["edges"]), 2)
 
 
 
@@ -525,6 +621,12 @@ class TestComputePose(unittest.TestCase):
 class TestCalibrationApi(unittest.TestCase):
     def setUp(self):
         self.prev_anchors = http_api.STATE.anchors.copy()
+        self.prev_manual_anchors = http_api.STATE.manual_anchors.copy()
+        self.prev_auto_anchors = http_api.STATE.auto_anchors.copy()
+        self.prev_active_layout_source = http_api.STATE.active_layout_source
+        self.prev_auto_layout_quality = dict(http_api.STATE.auto_layout_quality)
+        self.prev_auto_layout_status = dict(http_api.STATE.auto_layout_status)
+        self.prev_auto_layout_session = dict(http_api.STATE.auto_layout_session)
         self.prev_clocks = http_api.STATE.clock_params.copy()
         self.prev_dim = http_api.STATE.dim
         self.prev_schedule = dict(http_api.STATE.radio_schedule)
@@ -534,9 +636,20 @@ class TestCalibrationApi(unittest.TestCase):
         self.prev_save_calibration = http_api.save_calibration
         self.saved_payloads = []
         http_api.save_calibration = lambda payload: self.saved_payloads.append(payload)
+        http_api.STATE.auto_anchors = {}
+        http_api.STATE.auto_layout_quality = {}
+        http_api.STATE.auto_layout_status = {}
+        http_api.STATE.auto_layout_session = {}
+        http_api.STATE.active_layout_source = "manual"
 
     def tearDown(self):
         http_api.STATE.anchors = self.prev_anchors
+        http_api.STATE.manual_anchors = self.prev_manual_anchors
+        http_api.STATE.auto_anchors = self.prev_auto_anchors
+        http_api.STATE.active_layout_source = self.prev_active_layout_source
+        http_api.STATE.auto_layout_quality = self.prev_auto_layout_quality
+        http_api.STATE.auto_layout_status = self.prev_auto_layout_status
+        http_api.STATE.auto_layout_session = self.prev_auto_layout_session
         http_api.STATE.clock_params = self.prev_clocks
         http_api.STATE.set_dim(self.prev_dim)
         http_api.STATE.update_radio_schedule(self.prev_schedule)
@@ -639,6 +752,7 @@ class TestCalibrationApi(unittest.TestCase):
             "A2": np.array([8.0, 0.0, 2.6]),
             "A3": np.array([8.0, 6.0, 2.2]),
         }
+        http_api.STATE.manual_anchors = http_api.STATE.anchors.copy()
         http_api.STATE.update_dimension_from_anchors()
         payload = {
             "twr_edges": [
@@ -654,6 +768,70 @@ class TestCalibrationApi(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["layout_validation"]["quality"]["status"], "ok")
         self.assertEqual(http_api.STATE.layout_validation["quality"]["status"], "ok")
+
+    def test_geometry_session_promotes_auto_layout(self):
+        http_api.STATE.set_manual_anchors(
+            {
+                "A1": np.array([10.0, 10.0, 0.0]),
+                "A2": np.array([12.0, 10.0, 0.0]),
+                "A3": np.array([10.0, 12.0, 0.0]),
+                "A4": np.array([12.0, 12.0, 0.0]),
+            }
+        )
+        session = {
+            "roster_hash": 42,
+            "graph_seq": 7,
+            "status": "ok",
+            "anchor_count": 4,
+            "edges": [
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A3", "dist_m": math.sqrt(5.0), "valid": True},
+                {"a": "A1", "b": "A3", "dist_m": math.sqrt(5.0), "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": math.sqrt(3.0), "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": math.sqrt(3.0), "valid": True},
+                {"a": "A2", "b": "A3", "dist_m": math.sqrt(5.0), "valid": True},
+                {"a": "A2", "b": "A3", "dist_m": math.sqrt(5.0), "valid": True},
+                {"a": "A2", "b": "A4", "dist_m": math.sqrt(3.0), "valid": True},
+                {"a": "A2", "b": "A4", "dist_m": math.sqrt(3.0), "valid": True},
+                {"a": "A3", "b": "A4", "dist_m": math.sqrt(2.0), "valid": True},
+                {"a": "A3", "b": "A4", "dist_m": math.sqrt(2.0), "valid": True},
+            ],
+        }
+
+        http_api._apply_geometry_session(session)
+
+        self.assertEqual(http_api.STATE.active_layout_source, "auto")
+        self.assertEqual(http_api.STATE.auto_layout_quality["status"], "ok")
+        self.assertAlmostEqual(http_api.STATE.anchors["A1"][0], 0.0, places=6)
+        self.assertGreater(http_api.STATE.anchors["A2"][0], 0.0)
+
+    def test_geometry_session_rejects_and_falls_back_to_manual(self):
+        manual = {
+            "A1": np.array([0.0, 0.0, 0.0]),
+            "A2": np.array([2.0, 0.0, 0.0]),
+            "A3": np.array([0.0, 2.0, 0.0]),
+            "A4": np.array([2.0, 2.0, 1.0]),
+        }
+        http_api.STATE.set_manual_anchors(manual)
+        session = {
+            "roster_hash": 77,
+            "graph_seq": 9,
+            "status": "partial",
+            "anchor_count": 4,
+            "edges": [
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A3", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": math.sqrt(9.0), "valid": True},
+            ],
+        }
+
+        http_api._apply_geometry_session(session)
+
+        self.assertEqual(http_api.STATE.active_layout_source, "manual")
+        self.assertEqual(http_api.STATE.auto_layout_status["reason"], "disconnected_graph")
+        self.assertAlmostEqual(http_api.STATE.anchors["A4"][2], 1.0, places=6)
 
 
 if __name__ == "__main__":

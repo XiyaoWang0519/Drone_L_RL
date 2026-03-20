@@ -64,6 +64,34 @@ static double ticks_to_ns(double ticks)
     return ticks * 1e9 / DWT_TICK_HZ;
 }
 
+static const char *geom_status_str(uint8_t status)
+{
+    switch (status) {
+    case UWB_GEOM_STATUS_OK:
+        return "ok";
+    case UWB_GEOM_STATUS_PARTIAL:
+        return "partial";
+    case UWB_GEOM_STATUS_FAILED:
+        return "failed";
+    default:
+        return "unknown";
+    }
+}
+
+static const char *network_state_str(uint8_t state)
+{
+    switch (state) {
+    case UWB_NETWORK_SIGNAL_READY:
+        return "ready";
+    case UWB_NETWORK_SIGNAL_DEGRADED:
+        return "degraded";
+    case UWB_NETWORK_SIGNAL_FAULT:
+        return "fault";
+    default:
+        return "unknown";
+    }
+}
+
 static const struct device *cdc_dev;
 static volatile bool running = true;
 
@@ -370,6 +398,51 @@ void main(void)
                 } else {
                     rx_err++;
                     printk("DRONE: SYNC parse error len=%u ts=%llu err=%u\n",
+                           rx_len,
+                           (unsigned long long)last_rx_ts,
+                           rx_err);
+                }
+            } else if (rx_len >= 1 && rx_buf[0] == UWB_FRAME_TYPE_CAL) {
+                struct uwb_cal_frame cal;
+                if (uwb_cal_unpack(rx_buf, rx_len, &cal)) {
+                    rx_ok++;
+                    switch (cal.msg_type) {
+                    case UWB_CAL_MSG_PAIR_REPORT:
+                        printk("DRONE: CAL_EDGE a=A%u b=A%u sample=%u dist_m=%.3f valid=%u "
+                               "path_ticks=%lld seq=%u roster_hash=%llu ok=%u\n",
+                               cal.src_id,
+                               cal.dst_id,
+                               cal.slot_id,
+                               (double)cal.value16 / 1000.0,
+                               cal.flags & 0x01U,
+                               (long long)cal.ts_a,
+                               cal.seq,
+                               (unsigned long long)cal.ts_b,
+                               rx_ok);
+                        break;
+                    case UWB_CAL_MSG_GEOM_DONE:
+                        printk("DRONE: CAL_GRAPH status=%s roster_hash=%llu edges=%u anchors=%llu "
+                               "seq=%u ok=%u\n",
+                               geom_status_str(cal.flags),
+                               (unsigned long long)cal.ts_a,
+                               cal.value16,
+                               (unsigned long long)cal.ts_b,
+                               cal.seq,
+                               rx_ok);
+                        break;
+                    case UWB_CAL_MSG_NETWORK:
+                        printk("DRONE: CAL_READY state=%s roster_hash=%llu seq=%u ok=%u\n",
+                               network_state_str(cal.flags),
+                               (unsigned long long)cal.ts_a,
+                               cal.seq,
+                               rx_ok);
+                        break;
+                    default:
+                        break;
+                    }
+                } else {
+                    rx_err++;
+                    printk("DRONE: CAL parse error len=%u ts=%llu err=%u\n",
                            rx_len,
                            (unsigned long long)last_rx_ts,
                            rx_err);

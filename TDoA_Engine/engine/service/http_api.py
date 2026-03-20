@@ -70,7 +70,7 @@ except ModuleNotFoundError:  # pragma: no cover
     serial = None
 
 from .. import config
-from ..autocal import validate_layout_against_authoritative_positions
+from ..autocal import estimate_layout_from_twr, validate_layout_against_authoritative_positions
 from ..ingest import (
     DEFAULT_Q_NS2,
     DRONE_CLOCK_MODE,
@@ -89,6 +89,9 @@ from .ws_stream import BroadcastManager
 C_AIR = 299_702_547.0
 DW3XXX_TICK_HZ = 63_897_600_000.0
 GATING_SIGMA = 3.0
+AUTO_LAYOUT_RMS_GATE_M = 0.20
+AUTO_LAYOUT_MAX_ABS_GATE_M = 0.35
+AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE = 2
 
 BASE_PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DEFAULT_CALIB_PATH = os.path.join(BASE_PACKAGE_DIR, "engine", "logs", "calibration.json")
@@ -117,6 +120,12 @@ if _FASTAPI_AVAILABLE:
 class EngineState:
     def __init__(self) -> None:
         self.anchors: Dict[str, np.ndarray] = {}
+        self.manual_anchors: Dict[str, np.ndarray] = {}
+        self.auto_anchors: Dict[str, np.ndarray] = {}
+        self.active_layout_source = "manual"
+        self.auto_layout_quality: Dict[str, Any] = {}
+        self.auto_layout_status: Dict[str, Any] = {}
+        self.auto_layout_session: Dict[str, Any] = {}
         self.dim = 3
         self.ekf = CVEKF(dim=self.dim, q_acc=0.5)
         self.last_t: Optional[float] = None
@@ -164,6 +173,42 @@ class EngineState:
             return
         self.dim = dim_int
         self.reset_filter()
+
+    def _copy_anchor_map(self, anchors: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        return {anchor_id: np.array(pos, dtype=float) for anchor_id, pos in anchors.items()}
+
+    def _activate_layout(self) -> None:
+        if self.auto_anchors:
+            self.anchors = self._copy_anchor_map(self.auto_anchors)
+            self.active_layout_source = "auto"
+        elif self.manual_anchors:
+            self.anchors = self._copy_anchor_map(self.manual_anchors)
+            self.active_layout_source = "manual"
+        else:
+            self.anchors = {}
+            self.active_layout_source = "none"
+        self.update_dimension_from_anchors()
+
+    def set_manual_anchors(self, anchors: Dict[str, np.ndarray]) -> None:
+        self.manual_anchors = self._copy_anchor_map(anchors)
+        self._activate_layout()
+
+    def set_auto_layout(self, anchors: Dict[str, np.ndarray], quality: Dict[str, Any],
+                        status: Dict[str, Any], session: Dict[str, Any]) -> None:
+        self.auto_anchors = self._copy_anchor_map(anchors)
+        self.auto_layout_quality = dict(quality)
+        self.auto_layout_status = dict(status)
+        self.auto_layout_session = dict(session)
+        self._activate_layout()
+
+    def clear_auto_layout(self, status: Optional[Dict[str, Any]] = None,
+                          quality: Optional[Dict[str, Any]] = None,
+                          session: Optional[Dict[str, Any]] = None) -> None:
+        self.auto_anchors = {}
+        self.auto_layout_status = dict(status or {})
+        self.auto_layout_quality = dict(quality or {})
+        self.auto_layout_session = dict(session or {})
+        self._activate_layout()
 
     def infer_dimension(self) -> int:
         if not self.anchors:
@@ -228,8 +273,185 @@ class EngineState:
             "serial": serial_status,
         }
 
+    def anchor_payload(self, anchors: Optional[Dict[str, np.ndarray]] = None) -> List[Dict[str, Any]]:
+        selected = anchors if anchors is not None else self.anchors
+        return [
+            {
+                "id": key,
+                "pos": {"x": float(val[0]), "y": float(val[1]), "z": float(val[2])},
+            }
+            for key, val in sorted(selected.items())
+        ]
+
 
 STATE = EngineState()
+
+
+def _anchors_from_payload(anchors_payload: List[Dict[str, Any]]) -> Dict[str, np.ndarray]:
+    anchors: Dict[str, np.ndarray] = {}
+    for anchor in anchors_payload:
+        anchor_id = anchor.get("id")
+        if not anchor_id:
+            continue
+        pos = anchor.get("pos", {})
+        anchors[str(anchor_id)] = np.array(
+            [
+                float(pos.get("x", 0.0)),
+                float(pos.get("y", 0.0)),
+                float(pos.get("z", 0.0)),
+            ],
+            dtype=float,
+        )
+    return anchors
+
+
+def _serialize_clock_params() -> List[Dict[str, Any]]:
+    return [
+        {
+            "id": key,
+            "offset_ns": float(val.get("offset_ns", 0.0)),
+            "drift_ppm": float(val.get("drift_ppm", 0.0)),
+            "valid": bool(val.get("valid", True)),
+        }
+        for key, val in STATE.clock_params.items()
+    ]
+
+
+def _persist_current_calibration() -> None:
+    active_anchors = STATE.anchor_payload()
+    auto_anchors = STATE.anchor_payload(STATE.auto_anchors)
+    save_calibration(
+        {
+            "anchors": active_anchors,
+            "manual_anchors": STATE.anchor_payload(STATE.manual_anchors),
+            "auto_layout": {
+                "anchors": auto_anchors,
+                "quality": STATE.auto_layout_quality,
+                "status": STATE.auto_layout_status,
+                "session": STATE.auto_layout_session,
+            },
+            "active_layout_source": STATE.active_layout_source,
+            "anchor_clocks": _serialize_clock_params(),
+            "radio_schedule": dict(STATE.radio_schedule),
+            "layout_validation": STATE.layout_validation,
+        }
+    )
+
+
+def _summarize_geometry_session(session: Dict[str, Any]) -> Dict[str, Any]:
+    raw_edges = session.get("edges") or []
+    grouped: Dict[tuple[str, str], Dict[str, Any]] = {}
+    anchor_ids: Set[str] = set()
+    for edge in raw_edges:
+        a = str(edge.get("a") or "")
+        b = str(edge.get("b") or "")
+        if not a or not b or a == b:
+            continue
+        key = tuple(sorted((a, b)))
+        grouped.setdefault(key, {"a": key[0], "b": key[1], "samples": [], "raw_samples": 0})
+        grouped[key]["raw_samples"] += 1
+        if bool(edge.get("valid", False)):
+            grouped[key]["samples"].append(float(edge.get("dist_m", 0.0)))
+        anchor_ids.update(key)
+    expected_edges = (len(anchor_ids) * (len(anchor_ids) - 1)) // 2 if len(anchor_ids) >= 2 else 0
+    min_samples_ok = all(len(item["samples"]) >= AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE for item in grouped.values())
+    complete_graph = len(grouped) == expected_edges and expected_edges > 0
+    return {
+        "anchors": sorted(anchor_ids),
+        "edges": list(grouped.values()),
+        "edge_count": len(grouped),
+        "expected_edges": expected_edges,
+        "min_samples_ok": min_samples_ok,
+        "complete_graph": complete_graph,
+        "connected": complete_graph,
+    }
+
+
+def _apply_geometry_session(session: Dict[str, Any]) -> None:
+    summary = _summarize_geometry_session(session)
+    session_status = dict(session)
+    session_status["anchors"] = summary["anchors"]
+    quality: Dict[str, Any] = {
+        "status": "rejected",
+        "reason": "anchors_unavailable",
+    }
+
+    if int(session.get("anchor_count", 0) or 0) < 4 or len(summary["anchors"]) < 4:
+        quality = {"status": "rejected", "reason": "insufficient_anchors"}
+        STATE.clear_auto_layout(status={"status": "rejected", "reason": "insufficient_anchors"}, quality=quality, session=session_status)
+        STATE.reset_filter()
+        _persist_current_calibration()
+        return
+
+    if not summary["complete_graph"]:
+        quality = {
+            "status": "rejected",
+            "reason": "disconnected_graph",
+            "edge_count": summary["edge_count"],
+            "expected_edges": summary["expected_edges"],
+        }
+        STATE.clear_auto_layout(status=quality, quality=quality, session=session_status)
+        STATE.reset_filter()
+        _persist_current_calibration()
+        return
+
+    if not summary["min_samples_ok"]:
+        quality = {"status": "rejected", "reason": "insufficient_edge_samples"}
+        STATE.clear_auto_layout(status=quality, quality=quality, session=session_status)
+        STATE.reset_filter()
+        _persist_current_calibration()
+        return
+
+    layout = estimate_layout_from_twr(summary["edges"], dims=3)
+    layout_quality = dict(layout.get("quality", {}))
+    rms_m = float(layout_quality.get("rms_m", float("inf")))
+    max_abs_m = float(layout_quality.get("max_abs_m", float("inf")))
+    if (
+        layout_quality.get("status") != "ok"
+        or rms_m > AUTO_LAYOUT_RMS_GATE_M
+        or max_abs_m > AUTO_LAYOUT_MAX_ABS_GATE_M
+    ):
+        quality = {
+            **layout_quality,
+            "status": "rejected",
+            "reason": "quality_gate_failed",
+            "rms_gate_m": AUTO_LAYOUT_RMS_GATE_M,
+            "max_abs_gate_m": AUTO_LAYOUT_MAX_ABS_GATE_M,
+        }
+        STATE.clear_auto_layout(status=quality, quality=quality, session=session_status)
+        STATE.reset_filter()
+        _persist_current_calibration()
+        return
+
+    auto_anchors = _anchors_from_payload(layout.get("anchors", []))
+    if len(auto_anchors) < 4:
+        quality = {"status": "rejected", "reason": "insufficient_anchors"}
+        STATE.clear_auto_layout(status=quality, quality=quality, session=session_status)
+        STATE.reset_filter()
+        _persist_current_calibration()
+        return
+
+    quality = {
+        **layout_quality,
+        "status": "ok",
+        "rms_gate_m": AUTO_LAYOUT_RMS_GATE_M,
+        "max_abs_gate_m": AUTO_LAYOUT_MAX_ABS_GATE_M,
+        "source": "boot_autogeometry",
+    }
+    STATE.set_auto_layout(
+        auto_anchors,
+        quality=quality,
+        status={
+            "status": "ok",
+            "roster_hash": session.get("roster_hash"),
+            "graph_seq": session.get("graph_seq"),
+            "anchor_count": session.get("anchor_count"),
+            "edge_count": summary["edge_count"],
+        },
+        session=session_status,
+    )
+    STATE.reset_filter()
+    _persist_current_calibration()
 
 
 def load_calibration() -> None:
@@ -238,19 +460,23 @@ def load_calibration() -> None:
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
-            anchors = {}
-            for anchor in data.get("anchors", []):
-                pos = np.array(
-                    [
-                        float(anchor["pos"]["x"]),
-                        float(anchor["pos"]["y"]),
-                        float(anchor["pos"].get("z", 0.0)),
-                    ]
-                )
-                anchors[anchor["id"]] = pos
-            if anchors:
-                STATE.anchors = anchors
-                STATE.update_dimension_from_anchors()
+            manual_payload = data.get("manual_anchors") or data.get("anchors", [])
+            manual_anchors = _anchors_from_payload(manual_payload)
+            auto_payload = data.get("auto_layout") or {}
+            auto_anchors = _anchors_from_payload(auto_payload.get("anchors", []))
+            STATE.manual_anchors = manual_anchors
+            STATE.auto_anchors = auto_anchors
+            STATE.auto_layout_quality = dict(auto_payload.get("quality") or {})
+            STATE.auto_layout_status = dict(auto_payload.get("status") or {})
+            STATE.auto_layout_session = dict(auto_payload.get("session") or {})
+            active_source = str(data.get("active_layout_source") or "manual").lower()
+            if active_source == "auto" and auto_anchors:
+                STATE.anchors = STATE._copy_anchor_map(auto_anchors)
+                STATE.active_layout_source = "auto"
+            else:
+                STATE.anchors = STATE._copy_anchor_map(manual_anchors)
+                STATE.active_layout_source = "manual" if manual_anchors else "none"
+            STATE.update_dimension_from_anchors()
             clocks = data.get("anchor_clocks") or data.get("clocks")
             if isinstance(clocks, list):
                 STATE.update_clock_params(clocks)
@@ -260,12 +486,19 @@ def load_calibration() -> None:
             return
         except Exception:
             pass
-    STATE.anchors = {
+    defaults = {
         "A1": np.array([0.0, 0.0, 2.40]),
         "A2": np.array([8.0, 0.0, 2.65]),
         "A3": np.array([8.0, 6.0, 2.20]),
         "A4": np.array([0.0, 6.0, 2.55]),
     }
+    STATE.manual_anchors = STATE._copy_anchor_map(defaults)
+    STATE.auto_anchors = {}
+    STATE.auto_layout_quality = {}
+    STATE.auto_layout_status = {}
+    STATE.auto_layout_session = {}
+    STATE.anchors = STATE._copy_anchor_map(defaults)
+    STATE.active_layout_source = "manual"
     STATE.clock_params = {}
     STATE.update_radio_schedule(None)
     STATE.update_dimension_from_anchors()
@@ -277,6 +510,9 @@ def save_calibration(payload: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     snapshot = {
         "anchors": payload.get("anchors", []),
+        "manual_anchors": payload.get("manual_anchors", payload.get("anchors", [])),
+        "auto_layout": payload.get("auto_layout", {}),
+        "active_layout_source": payload.get("active_layout_source", "manual"),
         "anchor_clocks": payload.get("anchor_clocks", []),
         "radio_schedule": apply_radio_schedule_defaults(payload.get("radio_schedule")),
         "layout_validation": payload.get("layout_validation"),
@@ -307,6 +543,9 @@ def compute_pose(epoch: Dict[str, Any]) -> Dict[str, Any]:
     clock_mode = epoch.get("clock", {}).get("mode")
     observation_kind = epoch.get("observation_kind", "absolute_rx")
     min_required = STATE.dim + 1
+
+    if not STATE.anchors:
+        return {"ok": False, "reason": "anchors_unavailable"}
 
     for anchor in epoch.get("anchors", []):
         anchor_id = anchor.get("id")
@@ -442,6 +681,7 @@ def compute_pose(epoch: Dict[str, Any]) -> Dict[str, Any]:
             "outliers": len(dropped),
             "ref_anchor": ref_id,
             "anchor_order": ids,
+            "layout_source": STATE.active_layout_source,
         },
     }
     STATE.stats = {
@@ -451,6 +691,7 @@ def compute_pose(epoch: Dict[str, Any]) -> Dict[str, Any]:
         "outliers": dropped,
         "residual_rms_ns": residual_rms_ns,
         "source": epoch.get("source"),
+        "layout_source": STATE.active_layout_source,
     }
     return result
 
@@ -466,6 +707,7 @@ async def _process_epoch(epoch: Dict[str, Any]) -> None:
             "anchors_seen": [anchor.get("id") for anchor in epoch.get("anchors", [])],
             "reason": out.get("reason"),
             "source": epoch.get("source"),
+            "layout_source": STATE.active_layout_source,
         }
 
 
@@ -521,6 +763,8 @@ async def drone_serial_ingest_task() -> None:
                     if not line:
                         continue
                     epochs = STATE.serial_assembler.ingest_line(line, now_s=time.time())
+                    for session in STATE.serial_assembler.drain_geometry_sessions():
+                        _apply_geometry_session(session)
                     for epoch in epochs:
                         await _process_epoch(epoch)
         except asyncio.CancelledError:
@@ -584,6 +828,10 @@ async def healthz():
     return {
         "status": "ok",
         "anchors": list(STATE.anchors.keys()),
+        "active_layout_source": STATE.active_layout_source,
+        "manual_fallback_present": bool(STATE.manual_anchors),
+        "auto_layout_quality": STATE.auto_layout_quality,
+        "auto_layout_status": STATE.auto_layout_status,
         "clock": STATE.clock_params,
         "radio_schedule": STATE.radio_schedule,
         "layout_validation": STATE.layout_validation,
@@ -597,13 +845,6 @@ async def healthz():
 
 @app.get("/anchors")
 async def get_anchors():
-    anchors = [
-        {
-            "id": key,
-            "pos": {"x": float(val[0]), "y": float(val[1]), "z": float(val[2])},
-        }
-        for key, val in STATE.anchors.items()
-    ]
     clocks = [
         {
             "id": key,
@@ -614,7 +855,13 @@ async def get_anchors():
         for key, val in STATE.clock_params.items()
     ]
     return {
-        "anchors": anchors,
+        "anchors": STATE.anchor_payload(),
+        "manual_anchors": STATE.anchor_payload(STATE.manual_anchors),
+        "auto_anchors": STATE.anchor_payload(STATE.auto_anchors),
+        "active_layout_source": STATE.active_layout_source,
+        "manual_fallback_present": bool(STATE.manual_anchors),
+        "auto_layout_quality": STATE.auto_layout_quality,
+        "auto_layout_status": STATE.auto_layout_status,
         "anchor_clocks": clocks,
         "radio_schedule": STATE.radio_schedule,
         "layout_validation": STATE.layout_validation,
@@ -624,23 +871,10 @@ async def get_anchors():
 @app.post("/set_anchors")
 async def set_anchors(payload: Dict[str, Any] = Body(...)):
     anchors_payload = payload.get("anchors", [])
-    anchors: Dict[str, np.ndarray] = {}
-    for anchor in anchors_payload:
-        anchor_id = anchor.get("id")
-        if not anchor_id:
-            continue
-        pos = anchor.get("pos", {})
-        anchors[anchor_id] = np.array(
-            [
-                float(pos.get("x", 0.0)),
-                float(pos.get("y", 0.0)),
-                float(pos.get("z", 0.0)),
-            ]
-        )
+    anchors = _anchors_from_payload(anchors_payload)
     if not anchors:
         raise HTTPException(status_code=400, detail="no anchors provided")
-    STATE.anchors = anchors
-    STATE.update_dimension_from_anchors()
+    STATE.set_manual_anchors(anchors)
     clock_payload_provided = "anchor_clocks" in payload or "clocks" in payload
     clock_payload = payload.get("anchor_clocks") if "anchor_clocks" in payload else payload.get("clocks")
     if clock_payload_provided and not isinstance(clock_payload, list):
@@ -681,7 +915,15 @@ async def set_anchors(payload: Dict[str, Any] = Body(...)):
     STATE.reset_filter()
     save_calibration(
         {
-            "anchors": anchors_payload,
+            "anchors": STATE.anchor_payload(),
+            "manual_anchors": anchors_payload,
+            "auto_layout": {
+                "anchors": STATE.anchor_payload(STATE.auto_anchors),
+                "quality": STATE.auto_layout_quality,
+                "status": STATE.auto_layout_status,
+                "session": STATE.auto_layout_session,
+            },
+            "active_layout_source": STATE.active_layout_source,
             "anchor_clocks": persisted_clocks,
             "radio_schedule": radio_schedule_payload,
             "layout_validation": layout_validation,
@@ -689,7 +931,12 @@ async def set_anchors(payload: Dict[str, Any] = Body(...)):
             "map_id": payload.get("map_id"),
         }
     )
-    return {"ok": True, "count": len(anchors), "layout_validation": layout_validation}
+    return {
+        "ok": True,
+        "count": len(anchors),
+        "layout_validation": layout_validation,
+        "active_layout_source": STATE.active_layout_source,
+    }
 
 
 @app.post("/validate_anchor_layout")
@@ -697,15 +944,10 @@ async def validate_anchor_layout(payload: Dict[str, Any] = Body(...)):
     twr_edges = payload.get("twr_edges") or payload.get("edges")
     if not isinstance(twr_edges, list) or not twr_edges:
         raise HTTPException(status_code=400, detail="twr_edges must be a non-empty list")
-    if not STATE.anchors:
+    anchor_source = STATE.manual_anchors or STATE.anchors
+    if not anchor_source:
         raise HTTPException(status_code=400, detail="no authoritative anchors configured")
-    anchors_payload = [
-        {
-            "id": key,
-            "pos": {"x": float(val[0]), "y": float(val[1]), "z": float(val[2])},
-        }
-        for key, val in STATE.anchors.items()
-    ]
+    anchors_payload = STATE.anchor_payload(anchor_source)
     validation = validate_layout_against_authoritative_positions(
         twr_edges,
         anchors_payload,

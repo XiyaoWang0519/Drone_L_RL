@@ -23,6 +23,9 @@ enum uwb_cal_msg_type {
     UWB_CAL_MSG_STATUS_REQ = 0x07,
     UWB_CAL_MSG_STATUS = 0x08,
     UWB_CAL_MSG_NETWORK = 0x09,
+    UWB_CAL_MSG_PAIR_PLAN = 0x0A,
+    UWB_CAL_MSG_PAIR_REPORT = 0x0B,
+    UWB_CAL_MSG_GEOM_DONE = 0x0C,
 };
 
 enum uwb_anchor_state_code {
@@ -42,6 +45,14 @@ enum uwb_network_signal_code {
     UWB_NETWORK_SIGNAL_DEGRADED = 2,
     UWB_NETWORK_SIGNAL_FAULT = 3,
 };
+
+enum uwb_geom_status_code {
+    UWB_GEOM_STATUS_OK = 1,
+    UWB_GEOM_STATUS_PARTIAL = 2,
+    UWB_GEOM_STATUS_FAILED = 3,
+};
+
+#define UWB_CAL_FLAG_GEOMETRY 0x01U
 
 #define UWB_BLINK_FRAME_LEN 6
 #define UWB_SYNC_FRAME_LEN  9
