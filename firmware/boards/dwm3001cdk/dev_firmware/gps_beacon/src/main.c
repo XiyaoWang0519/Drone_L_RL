@@ -72,6 +72,7 @@ void dw_port_reset_deassert(void);
 #define CAL_READY_SYNC_BURST          MAX(4U, ((CAL_SYNC_SAMPLES + 1U) / 2U))
 #define CAL_GEOMETRY_REPLAY_COUNT     4U
 #define CAL_GEOM_DONE_BROADCASTS      3U
+#define CAL_GEOMETRY_RETRY_BURST      3U
 
 #define BEACON_ID      CONFIG_UWB_BEACON_ID
 #define BEACON_SLOT_ID CONFIG_UWB_BEACON_SLOT_ID
@@ -582,6 +583,60 @@ static bool geometry_graph_needs_samples(const struct geometry_edge *edges, size
     }
 
     return false;
+}
+
+static size_t geometry_pair_retry_goal(size_t sample_count)
+{
+    if (sample_count < CAL_TWR_MIN_VALID_SAMPLES) {
+        return CAL_TWR_MIN_VALID_SAMPLES;
+    }
+    return CAL_GEOMETRY_TARGET_SAMPLES;
+}
+
+static bool geometry_select_retry_pair(const struct geometry_edge *edges, size_t count,
+                                       const uint8_t *roster_ids, size_t roster_count,
+                                       uint8_t *best_a_id, uint8_t *best_b_id,
+                                       size_t *best_samples, size_t *best_goal)
+{
+    bool found = false;
+    uint8_t selected_a = 0U;
+    uint8_t selected_b = 0U;
+    size_t selected_samples = 0U;
+    size_t selected_goal = 0U;
+    uint8_t selected_priority = UINT8_MAX;
+
+    for (size_t i = 0; i < roster_count; ++i) {
+        for (size_t j = i + 1U; j < roster_count; ++j) {
+            size_t samples = geometry_pair_sample_count(edges, count, roster_ids[i], roster_ids[j]);
+            size_t goal = geometry_pair_retry_goal(samples);
+            uint8_t priority;
+
+            if (samples >= goal) {
+                continue;
+            }
+
+            priority = (samples < CAL_TWR_MIN_VALID_SAMPLES) ? 0U : 1U;
+            if (!found || priority < selected_priority ||
+                (priority == selected_priority && samples < selected_samples)) {
+                found = true;
+                selected_a = roster_ids[i];
+                selected_b = roster_ids[j];
+                selected_samples = samples;
+                selected_goal = goal;
+                selected_priority = priority;
+            }
+        }
+    }
+
+    if (!found) {
+        return false;
+    }
+
+    *best_a_id = selected_a;
+    *best_b_id = selected_b;
+    *best_samples = selected_samples;
+    *best_goal = selected_goal;
+    return true;
 }
 
 static uint8_t geometry_status_from_edges(size_t anchor_count, size_t valid_edges)
@@ -2547,43 +2602,57 @@ static void master_collect_geometry_graph(struct discovered_slave *slaves, size_
            k_uptime_get() < settle_deadline &&
            geometry_graph_needs_samples(edges, edge_count, roster_ids, roster_count)) {
         bool progress = false;
+        uint8_t a_id;
+        uint8_t b_id;
+        size_t samples = 0U;
+        size_t goal = 0U;
 
-        for (size_t i = 0; i < roster_count; ++i) {
-            for (size_t j = i + 1U; j < roster_count; ++j) {
-                uint8_t a_id = roster_ids[i];
-                uint8_t b_id = roster_ids[j];
-                uint8_t sample_idx;
-                struct uwb_cal_frame report;
-                bool ok;
+        if (!geometry_select_retry_pair(edges, edge_count, roster_ids, roster_count,
+                                        &a_id, &b_id, &samples, &goal)) {
+            break;
+        }
 
-                if (k_uptime_get() >= settle_deadline) {
-                    break;
-                }
-                if (!geometry_pair_needs_samples(edges, edge_count, a_id, b_id)) {
-                    continue;
-                }
+        printk("CAL: geometry retry focus a=%u b=%u samples=%u goal=%u window_left_ms=%lld\n",
+               a_id,
+               b_id,
+               (unsigned int)samples,
+               (unsigned int)goal,
+               (long long)MAX(0LL, settle_deadline - k_uptime_get()));
 
-                sample_idx = (uint8_t)MIN(geometry_pair_sample_count(edges, edge_count, a_id, b_id),
-                                          UINT8_MAX);
+        for (uint8_t burst = 0U; burst < CAL_GEOMETRY_RETRY_BURST; ++burst) {
+            uint8_t sample_idx;
+            struct uwb_cal_frame report;
+            bool ok;
 
-                if (a_id == BEACON_ID) {
-                    ok = master_geometry_pair_with_master(b_id, sample_idx, roster_hash,
-                                                          cal_seq, &report);
-                } else {
-                    ok = master_geometry_pair_between_slaves_bidirectional(a_id, b_id, sample_idx,
-                                                                           roster_hash, cal_seq,
-                                                                           &report);
-                }
-
-                if (!ok) {
-                    printk("CAL: pair retry timeout a=%u b=%u sample=%u seq=%u\n",
-                           a_id, b_id, sample_idx, *cal_seq);
-                    continue;
-                }
-
-                progress |= master_collect_geometry_edge(edges, &edge_count, &report);
-                k_msleep(5);
+            if (k_uptime_get() >= settle_deadline) {
+                break;
             }
+
+            samples = geometry_pair_sample_count(edges, edge_count, a_id, b_id);
+            goal = geometry_pair_retry_goal(samples);
+            if (samples >= goal) {
+                break;
+            }
+
+            sample_idx = (uint8_t)MIN(samples, UINT8_MAX);
+
+            if (a_id == BEACON_ID) {
+                ok = master_geometry_pair_with_master(b_id, sample_idx, roster_hash,
+                                                      cal_seq, &report);
+            } else {
+                ok = master_geometry_pair_between_slaves_bidirectional(a_id, b_id, sample_idx,
+                                                                       roster_hash, cal_seq,
+                                                                       &report);
+            }
+
+            if (!ok) {
+                printk("CAL: pair retry timeout a=%u b=%u sample=%u seq=%u\n",
+                       a_id, b_id, sample_idx, *cal_seq);
+                continue;
+            }
+
+            progress |= master_collect_geometry_edge(edges, &edge_count, &report);
+            k_msleep(5);
         }
 
         if (!progress) {

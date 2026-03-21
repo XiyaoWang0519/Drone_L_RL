@@ -5,6 +5,7 @@ import os
 import struct
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -486,6 +487,8 @@ class TestComputePose(unittest.TestCase):
         self.prev_clocks = http_api.STATE.clock_params.copy()
         self.prev_dim = http_api.STATE.dim
         self.prev_schedule = dict(http_api.STATE.radio_schedule)
+        self.prev_max_residual_rms_ns = engine_config.MAX_RESIDUAL_RMS_NS
+        self.prev_max_gdop = engine_config.MAX_GDOP
         http_api.STATE.anchors = {
             "A1": np.array([0.0, 0.0, 2.40]),
             "A2": np.array([8.0, 0.0, 2.65]),
@@ -510,6 +513,8 @@ class TestComputePose(unittest.TestCase):
         http_api.STATE.update_radio_schedule(self.prev_schedule)
         http_api.STATE.update_dimension_from_anchors()
         http_api.STATE.set_dim(self.prev_dim)
+        engine_config.MAX_RESIDUAL_RMS_NS = self.prev_max_residual_rms_ns
+        engine_config.MAX_GDOP = self.prev_max_gdop
         http_api.STATE.reset_filter()
 
     def test_compute_pose_with_clock_compensation(self):
@@ -599,6 +604,42 @@ class TestComputePose(unittest.TestCase):
         self.assertAlmostEqual(result["pose"]["y"], tag_pos[1], places=2)
         self.assertAlmostEqual(result["pose"]["z"], 0.0, places=2)
 
+    def test_quality_gate_rejection_does_not_update_filter_state(self):
+        tag_pos = np.array([3.2, 2.6, 1.3], dtype=float)
+        t_tx = 1.0
+        tick_hz = http_api.STATE.tick_hz
+        epoch = {"tag_tx_seq": 1, "t_tx_tag": t_tx, "anchors": [], "clock": {"tick_hz": tick_hz}}
+        for anchor_id, pos in http_api.STATE.anchors.items():
+            dist = np.linalg.norm(tag_pos - pos)
+            t_true = t_tx + dist / C_AIR
+            params = http_api.STATE.clock_params.get(anchor_id, {"offset_ns": 0.0, "drift_ppm": 0.0})
+            offset = params.get("offset_ns", 0.0) * 1e-9
+            drift = params.get("drift_ppm", 0.0) * 1e-6
+            t_anchor = (1.0 + drift) * t_true + offset
+            epoch["anchors"].append(
+                {
+                    "id": anchor_id,
+                    "t_rx_anc": t_anchor * tick_hz,
+                    "q": 0.15 ** 2,
+                    "cir_snr_db": 20.0,
+                    "nlos_score": 0.0,
+                }
+            )
+
+        engine_config.MAX_GDOP = 0.0
+        state_before, cov_before = http_api.STATE.ekf.state()
+        self.assertIsNone(http_api.STATE.last_t)
+
+        result = http_api.compute_pose(epoch)
+
+        state_after, cov_after = http_api.STATE.ekf.state()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "quality_gate_failed")
+        self.assertEqual(result["metric"], "gdop")
+        self.assertIsNone(http_api.STATE.last_t)
+        self.assertTrue(np.allclose(state_before, state_after))
+        self.assertTrue(np.allclose(cov_before, cov_after))
+
     def test_dimension_detection_from_anchor_layout(self):
         http_api.STATE.anchors = {
             "A1": np.array([0.0, 0.0, 0.0]),
@@ -633,6 +674,8 @@ class TestCalibrationApi(unittest.TestCase):
         self.prev_layout_validation = dict(http_api.STATE.layout_validation)
         self.prev_tick_hz = engine_config.TICK_HZ
         self.prev_calibration_file = engine_config.CALIBRATION_FILE
+        self.prev_auto_layout_rms_gate = http_api.AUTO_LAYOUT_RMS_GATE_M
+        self.prev_auto_layout_max_abs_gate = http_api.AUTO_LAYOUT_MAX_ABS_GATE_M
         self.prev_save_calibration = http_api.save_calibration
         self.saved_payloads = []
         http_api.save_calibration = lambda payload: self.saved_payloads.append(payload)
@@ -657,6 +700,8 @@ class TestCalibrationApi(unittest.TestCase):
         http_api.STATE.reset_filter()
         engine_config.TICK_HZ = self.prev_tick_hz
         engine_config.CALIBRATION_FILE = self.prev_calibration_file
+        http_api.AUTO_LAYOUT_RMS_GATE_M = self.prev_auto_layout_rms_gate
+        http_api.AUTO_LAYOUT_MAX_ABS_GATE_M = self.prev_auto_layout_max_abs_gate
         http_api.save_calibration = self.prev_save_calibration
 
     def test_set_anchors_preserves_schedule_when_omitted(self):
@@ -866,6 +911,55 @@ class TestCalibrationApi(unittest.TestCase):
             http_api.STATE.auto_layout_status["weak_edges"],
             [{"a": "A1", "b": "A3", "samples": 1, "required_samples": 2}],
         )
+
+    def test_geometry_session_uses_configurable_quality_gates(self):
+        session = {
+            "roster_hash": 99,
+            "graph_seq": 11,
+            "status": "ok",
+            "anchor_count": 4,
+            "edges": [
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A3", "dist_m": 2.2, "valid": True},
+                {"a": "A1", "b": "A3", "dist_m": 2.2, "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": 2.5, "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": 2.5, "valid": True},
+                {"a": "A2", "b": "A3", "dist_m": 2.1, "valid": True},
+                {"a": "A2", "b": "A3", "dist_m": 2.1, "valid": True},
+                {"a": "A2", "b": "A4", "dist_m": 2.4, "valid": True},
+                {"a": "A2", "b": "A4", "dist_m": 2.4, "valid": True},
+                {"a": "A3", "b": "A4", "dist_m": 1.8, "valid": True},
+                {"a": "A3", "b": "A4", "dist_m": 1.8, "valid": True},
+            ],
+        }
+        mocked_layout = {
+            "anchors": [
+                {"id": "A1", "pos": {"x": 0.0, "y": 0.0, "z": 0.0}},
+                {"id": "A2", "pos": {"x": 2.0, "y": 0.0, "z": 0.0}},
+                {"id": "A3", "pos": {"x": 1.1, "y": 1.0, "z": 0.0}},
+                {"id": "A4", "pos": {"x": 0.4, "y": 0.3, "z": 0.8}},
+            ],
+            "quality": {
+                "status": "ok",
+                "rms_m": 0.2166,
+                "max_abs_m": 0.4288,
+                "edges_used": 6,
+                "anchors": ["A1", "A2", "A3", "A4"],
+                "dims": 2,
+            },
+        }
+
+        http_api.AUTO_LAYOUT_RMS_GATE_M = 0.25
+        http_api.AUTO_LAYOUT_MAX_ABS_GATE_M = 0.45
+
+        with mock.patch.object(http_api, "estimate_layout_from_twr", return_value=mocked_layout):
+            http_api._apply_geometry_session(session)
+
+        self.assertEqual(http_api.STATE.active_layout_source, "auto")
+        self.assertEqual(http_api.STATE.auto_layout_quality["status"], "ok")
+        self.assertEqual(http_api.STATE.auto_layout_quality["rms_gate_m"], 0.25)
+        self.assertEqual(http_api.STATE.auto_layout_quality["max_abs_gate_m"], 0.45)
 
 
 if __name__ == "__main__":

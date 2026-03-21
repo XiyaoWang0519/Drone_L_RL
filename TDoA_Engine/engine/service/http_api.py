@@ -89,8 +89,8 @@ from .ws_stream import BroadcastManager
 C_AIR = 299_702_547.0
 DW3XXX_TICK_HZ = 63_897_600_000.0
 GATING_SIGMA = 3.0
-AUTO_LAYOUT_RMS_GATE_M = 0.20
-AUTO_LAYOUT_MAX_ABS_GATE_M = 0.35
+AUTO_LAYOUT_RMS_GATE_M = getattr(config, "AUTO_LAYOUT_RMS_GATE_M", 0.25)
+AUTO_LAYOUT_MAX_ABS_GATE_M = getattr(config, "AUTO_LAYOUT_MAX_ABS_GATE_M", 0.45)
 AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE = 2
 
 BASE_PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -658,6 +658,33 @@ def compute_pose(epoch: Dict[str, Any]) -> Dict[str, Any]:
     ids = [entry["id"] for entry in active]
     ref_id = ids[0]
     solved["used"] = len(active)
+    residual_rms_ns = float(solved.get("rms", 0.0)) / C_AIR * 1e9
+    gdop = None
+    if solved.get("cov") is not None:
+        try:
+            gdop = float(math.sqrt(np.trace(solved["cov"])))
+        except Exception:
+            gdop = None
+
+    max_residual_rms_ns = float(getattr(config, "MAX_RESIDUAL_RMS_NS", 500.0))
+    max_gdop = float(getattr(config, "MAX_GDOP", 50.0))
+    if residual_rms_ns > max_residual_rms_ns:
+        return {
+            "ok": False,
+            "reason": "quality_gate_failed",
+            "metric": "residual_rms_ns",
+            "value": residual_rms_ns,
+            "threshold": max_residual_rms_ns,
+        }
+    if gdop is not None and gdop > max_gdop:
+        return {
+            "ok": False,
+            "reason": "quality_gate_failed",
+            "metric": "gdop",
+            "value": gdop,
+            "threshold": max_gdop,
+        }
+
     if STATE.last_t is None:
         dt_ekf = 1.0 / 50.0
     else:
@@ -682,13 +709,7 @@ def compute_pose(epoch: Dict[str, Any]) -> Dict[str, Any]:
     pose_vec = np.array([float(pos[i]) for i in range(STATE.dim)])
     vel_vec = np.array([float(vel[i]) for i in range(STATE.dim)])
     pos_cov = P[: STATE.dim, : STATE.dim]
-    residual_rms_ns = float(solved.get("rms", 0.0)) / C_AIR * 1e9
-    gdop = None
-    if solved.get("cov") is not None:
-        try:
-            gdop = float(math.sqrt(np.trace(solved["cov"])))
-        except Exception:
-            gdop = None
+
     result = {
         "ok": True,
         "t": float(STATE.last_t),
@@ -728,6 +749,9 @@ async def _process_epoch(epoch: Dict[str, Any]) -> None:
             "last_seq": int(epoch.get("tag_tx_seq", -1)),
             "anchors_seen": [anchor.get("id") for anchor in epoch.get("anchors", [])],
             "reason": out.get("reason"),
+            "metric": out.get("metric"),
+            "value": out.get("value"),
+            "threshold": out.get("threshold"),
             "source": epoch.get("source"),
             "layout_source": STATE.active_layout_source,
         }

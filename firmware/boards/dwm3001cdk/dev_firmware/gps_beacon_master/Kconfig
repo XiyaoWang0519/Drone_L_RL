@@ -184,7 +184,7 @@ config UWB_CAL_GEOMETRY_TARGET_SAMPLES
 
 config UWB_CAL_GEOMETRY_SETTLE_MS
     int "Extra geometry retry budget (ms)"
-    default 5000
+    default 8000
     range 0 10000
     help
       Additional boot-time budget the master may spend retrying geometry
