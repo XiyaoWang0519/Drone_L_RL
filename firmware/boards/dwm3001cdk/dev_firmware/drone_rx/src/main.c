@@ -19,6 +19,8 @@ void dw_port_reset_deassert(void);
 
 #define TS40_MASK   ((1ULL << 40) - 1ULL)
 #define DWT_TICK_HZ 63897600000.0
+#define TX_ANT_DLY  CONFIG_UWB_TX_ANT_DLY
+#define RX_ANT_DLY  CONFIG_UWB_RX_ANT_DLY
 
 #define UWB_NODE DT_NODELABEL(dwm3001c_uwb)
 static const struct gpio_dt_spec uwb_irq = GPIO_DT_SPEC_GET(UWB_NODE, irq_gpios);
@@ -247,6 +249,8 @@ static int dw3110_radio_init(void)
         return -EIO;
     }
 
+    dwt_setrxantennadelay((uint16_t)RX_ANT_DLY);
+    dwt_settxantennadelay((uint16_t)TX_ANT_DLY);
     dwt_configureframefilter(DWT_FF_DISABLE, 0);
     dwt_setlnapamode(DWT_LNA_ENABLE | DWT_PA_ENABLE);
 
@@ -408,18 +412,22 @@ void main(void)
                     rx_ok++;
                     switch (cal.msg_type) {
                     case UWB_CAL_MSG_PAIR_REPORT:
-                        printk("DRONE: CAL_EDGE a=A%u b=A%u sample=%u dist_m=%.3f valid=%u "
+                    {
+                        uint32_t dist_mm = cal.value16;
+                        printk("DRONE: CAL_EDGE a=A%u b=A%u sample=%u dist_m=%u.%03u valid=%u "
                                "path_ticks=%lld seq=%u roster_hash=%llu ok=%u\n",
                                cal.src_id,
                                cal.dst_id,
                                cal.slot_id,
-                               (double)cal.value16 / 1000.0,
+                               (unsigned int)(dist_mm / 1000U),
+                               (unsigned int)(dist_mm % 1000U),
                                cal.flags & 0x01U,
                                (long long)cal.ts_a,
                                cal.seq,
                                (unsigned long long)cal.ts_b,
                                rx_ok);
                         break;
+                    }
                     case UWB_CAL_MSG_GEOM_DONE:
                         printk("DRONE: CAL_GRAPH status=%s roster_hash=%llu edges=%u anchors=%llu "
                                "seq=%u ok=%u\n",

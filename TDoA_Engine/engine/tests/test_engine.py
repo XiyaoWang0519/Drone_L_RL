@@ -831,7 +831,41 @@ class TestCalibrationApi(unittest.TestCase):
 
         self.assertEqual(http_api.STATE.active_layout_source, "manual")
         self.assertEqual(http_api.STATE.auto_layout_status["reason"], "disconnected_graph")
+        self.assertEqual(
+            http_api.STATE.auto_layout_status["missing_edges"],
+            [{"a": "A2", "b": "A3"}, {"a": "A2", "b": "A4"}, {"a": "A3", "b": "A4"}],
+        )
         self.assertAlmostEqual(http_api.STATE.anchors["A4"][2], 1.0, places=6)
+
+    def test_geometry_session_rejects_with_weak_edge_details(self):
+        session = {
+            "roster_hash": 88,
+            "graph_seq": 10,
+            "status": "partial",
+            "anchor_count": 4,
+            "edges": [
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A3", "dist_m": 2.5, "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": 3.0, "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": 3.0, "valid": True},
+                {"a": "A2", "b": "A3", "dist_m": 2.2, "valid": True},
+                {"a": "A2", "b": "A3", "dist_m": 2.2, "valid": True},
+                {"a": "A2", "b": "A4", "dist_m": 2.8, "valid": True},
+                {"a": "A2", "b": "A4", "dist_m": 2.8, "valid": True},
+                {"a": "A3", "b": "A4", "dist_m": 1.7, "valid": True},
+                {"a": "A3", "b": "A4", "dist_m": 1.7, "valid": True},
+            ],
+        }
+
+        http_api._apply_geometry_session(session)
+
+        self.assertEqual(http_api.STATE.active_layout_source, "none")
+        self.assertEqual(http_api.STATE.auto_layout_status["reason"], "insufficient_edge_samples")
+        self.assertEqual(
+            http_api.STATE.auto_layout_status["weak_edges"],
+            [{"a": "A1", "b": "A3", "samples": 1, "required_samples": 2}],
+        )
 
 
 if __name__ == "__main__":

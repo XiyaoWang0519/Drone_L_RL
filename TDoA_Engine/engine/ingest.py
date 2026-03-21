@@ -503,20 +503,59 @@ class DroneSerialEpochAssembler:
         )
 
     def _ingest_cal_graph(self, event: DroneCalGraphEvent) -> None:
+        self._complete_geometry_session(
+            roster_hash=event.roster_hash,
+            graph_seq=event.seq,
+            status=event.status,
+            anchor_count=event.anchor_count,
+            edge_count=event.edge_count,
+        )
+
+    def _ingest_cal_ready(self, event: DroneCalReadyEvent) -> None:
+        self.last_ready_state = event.state
+        if self.pending_geometry_edges and event.state in {"ready", "degraded", "localize"}:
+            anchor_ids = {
+                anchor_id
+                for edge in self.pending_geometry_edges
+                for anchor_id in (edge.get("a"), edge.get("b"))
+                if anchor_id
+            }
+            roster_hash = event.roster_hash
+            if roster_hash is None:
+                for edge in reversed(self.pending_geometry_edges):
+                    candidate = edge.get("roster_hash")
+                    if candidate is not None:
+                        roster_hash = int(candidate)
+                        break
+            self._complete_geometry_session(
+                roster_hash=int(roster_hash or 0),
+                graph_seq=event.seq,
+                status=f"inferred_{event.state}",
+                anchor_count=len(anchor_ids),
+            )
+
+    def _complete_geometry_session(
+        self,
+        *,
+        roster_hash: int,
+        graph_seq: int,
+        status: str,
+        anchor_count: int,
+        edge_count: Optional[int] = None,
+    ) -> None:
+        if not self.pending_geometry_edges:
+            return
         session = {
-            "roster_hash": event.roster_hash,
-            "graph_seq": event.seq,
-            "status": event.status,
-            "edge_count": event.edge_count,
-            "anchor_count": event.anchor_count,
+            "roster_hash": int(roster_hash),
+            "graph_seq": int(graph_seq),
+            "status": str(status),
+            "edge_count": int(edge_count if edge_count is not None else len(self.pending_geometry_edges)),
+            "anchor_count": int(anchor_count),
             "edges": list(self.pending_geometry_edges),
         }
         self.pending_geometry_edges.clear()
         self.completed_geometry_sessions.append(session)
         self.diagnostics["geometry_sessions"] = self.diagnostics.get("geometry_sessions", 0) + 1
-
-    def _ingest_cal_ready(self, event: DroneCalReadyEvent) -> None:
-        self.last_ready_state = event.state
 
     def _ingest_blink(self, event: DroneBlinkEvent) -> None:
         if self.last_sync is not None:

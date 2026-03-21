@@ -353,17 +353,40 @@ def _summarize_geometry_session(session: Dict[str, Any]) -> Dict[str, Any]:
         if bool(edge.get("valid", False)):
             grouped[key]["samples"].append(float(edge.get("dist_m", 0.0)))
         anchor_ids.update(key)
+    sorted_anchor_ids = sorted(anchor_ids)
+    expected_pairs = [
+        (sorted_anchor_ids[i], sorted_anchor_ids[j])
+        for i in range(len(sorted_anchor_ids))
+        for j in range(i + 1, len(sorted_anchor_ids))
+    ]
+    missing_edges = [
+        {"a": a, "b": b}
+        for a, b in expected_pairs
+        if (a, b) not in grouped
+    ]
+    weak_edges = [
+        {
+            "a": item["a"],
+            "b": item["b"],
+            "samples": len(item["samples"]),
+            "required_samples": AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE,
+        }
+        for item in grouped.values()
+        if len(item["samples"]) < AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE
+    ]
     expected_edges = (len(anchor_ids) * (len(anchor_ids) - 1)) // 2 if len(anchor_ids) >= 2 else 0
-    min_samples_ok = all(len(item["samples"]) >= AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE for item in grouped.values())
+    min_samples_ok = not weak_edges
     complete_graph = len(grouped) == expected_edges and expected_edges > 0
     return {
-        "anchors": sorted(anchor_ids),
+        "anchors": sorted_anchor_ids,
         "edges": list(grouped.values()),
         "edge_count": len(grouped),
         "expected_edges": expected_edges,
         "min_samples_ok": min_samples_ok,
         "complete_graph": complete_graph,
         "connected": complete_graph,
+        "missing_edges": missing_edges,
+        "weak_edges": weak_edges,
     }
 
 
@@ -389,6 +412,7 @@ def _apply_geometry_session(session: Dict[str, Any]) -> None:
             "reason": "disconnected_graph",
             "edge_count": summary["edge_count"],
             "expected_edges": summary["expected_edges"],
+            "missing_edges": summary["missing_edges"],
         }
         STATE.clear_auto_layout(status=quality, quality=quality, session=session_status)
         STATE.reset_filter()
@@ -396,7 +420,11 @@ def _apply_geometry_session(session: Dict[str, Any]) -> None:
         return
 
     if not summary["min_samples_ok"]:
-        quality = {"status": "rejected", "reason": "insufficient_edge_samples"}
+        quality = {
+            "status": "rejected",
+            "reason": "insufficient_edge_samples",
+            "weak_edges": summary["weak_edges"],
+        }
         STATE.clear_auto_layout(status=quality, quality=quality, session=session_status)
         STATE.reset_filter()
         _persist_current_calibration()
@@ -486,19 +514,13 @@ def load_calibration() -> None:
             return
         except Exception:
             pass
-    defaults = {
-        "A1": np.array([0.0, 0.0, 2.40]),
-        "A2": np.array([8.0, 0.0, 2.65]),
-        "A3": np.array([8.0, 6.0, 2.20]),
-        "A4": np.array([0.0, 6.0, 2.55]),
-    }
-    STATE.manual_anchors = STATE._copy_anchor_map(defaults)
+    STATE.manual_anchors = {}
     STATE.auto_anchors = {}
     STATE.auto_layout_quality = {}
     STATE.auto_layout_status = {}
     STATE.auto_layout_session = {}
-    STATE.anchors = STATE._copy_anchor_map(defaults)
-    STATE.active_layout_source = "manual"
+    STATE.anchors = {}
+    STATE.active_layout_source = "none"
     STATE.clock_params = {}
     STATE.update_radio_schedule(None)
     STATE.update_dimension_from_anchors()
