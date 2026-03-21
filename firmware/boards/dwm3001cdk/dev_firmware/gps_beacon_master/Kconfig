@@ -191,6 +191,15 @@ config UWB_CAL_GEOMETRY_SETTLE_MS
       edges that still have too few successful samples after the initial
       all-pairs sweep.
 
+config UWB_CAL_GEOMETRY_REQUIRE_COMPLETE
+    bool "Require full geometry graph before runtime"
+    default y
+    help
+      After the bounded geometry retry window expires, keep focused retries on
+      the missing or under-sampled anchor pairs until the boot-time geometry
+      graph is complete. Disable this to allow the master to continue with an
+      incomplete graph after the retry budget is exhausted.
+
 config UWB_CAL_READY_MIN_TIMEOUT_MS
     int "Minimum self-ready wait timeout (ms)"
     default 4000

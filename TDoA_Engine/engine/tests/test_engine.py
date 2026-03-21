@@ -676,6 +676,7 @@ class TestCalibrationApi(unittest.TestCase):
         self.prev_calibration_file = engine_config.CALIBRATION_FILE
         self.prev_auto_layout_rms_gate = http_api.AUTO_LAYOUT_RMS_GATE_M
         self.prev_auto_layout_max_abs_gate = http_api.AUTO_LAYOUT_MAX_ABS_GATE_M
+        self.prev_auto_layout_min_samples = http_api.AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE
         self.prev_save_calibration = http_api.save_calibration
         self.saved_payloads = []
         http_api.save_calibration = lambda payload: self.saved_payloads.append(payload)
@@ -702,6 +703,7 @@ class TestCalibrationApi(unittest.TestCase):
         engine_config.CALIBRATION_FILE = self.prev_calibration_file
         http_api.AUTO_LAYOUT_RMS_GATE_M = self.prev_auto_layout_rms_gate
         http_api.AUTO_LAYOUT_MAX_ABS_GATE_M = self.prev_auto_layout_max_abs_gate
+        http_api.AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE = self.prev_auto_layout_min_samples
         http_api.save_calibration = self.prev_save_calibration
 
     def test_set_anchors_preserves_schedule_when_omitted(self):
@@ -883,6 +885,7 @@ class TestCalibrationApi(unittest.TestCase):
         self.assertAlmostEqual(http_api.STATE.anchors["A4"][2], 1.0, places=6)
 
     def test_geometry_session_rejects_with_weak_edge_details(self):
+        http_api.AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE = 2
         session = {
             "roster_hash": 88,
             "graph_seq": 10,
@@ -911,6 +914,30 @@ class TestCalibrationApi(unittest.TestCase):
             http_api.STATE.auto_layout_status["weak_edges"],
             [{"a": "A1", "b": "A3", "samples": 1, "required_samples": 2}],
         )
+
+    def test_geometry_session_accepts_single_edge_report_per_pair(self):
+        session = {
+            "roster_hash": 91,
+            "graph_seq": 12,
+            "status": "ok",
+            "anchor_count": 4,
+            "edges": [
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A3", "dist_m": math.sqrt(5.0), "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": math.sqrt(3.0), "valid": True},
+                {"a": "A2", "b": "A3", "dist_m": math.sqrt(5.0), "valid": True},
+                {"a": "A2", "b": "A4", "dist_m": math.sqrt(3.0), "valid": True},
+                {"a": "A3", "b": "A4", "dist_m": math.sqrt(2.0), "valid": True},
+            ],
+        }
+
+        http_api.AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE = 1
+
+        http_api._apply_geometry_session(session)
+
+        self.assertEqual(http_api.STATE.active_layout_source, "auto")
+        self.assertEqual(http_api.STATE.auto_layout_quality["status"], "ok")
+        self.assertEqual(http_api.STATE.auto_layout_quality["edges_used"], 6)
 
     def test_geometry_session_uses_configurable_quality_gates(self):
         session = {

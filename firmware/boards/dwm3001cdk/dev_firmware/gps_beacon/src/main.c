@@ -52,6 +52,7 @@ void dw_port_reset_deassert(void);
 #define CAL_SYNC_SAMPLES              CONFIG_UWB_CAL_SYNC_SAMPLES
 #define CAL_GEOMETRY_TARGET_SAMPLES   CONFIG_UWB_CAL_GEOMETRY_TARGET_SAMPLES
 #define CAL_GEOMETRY_SETTLE_MS        CONFIG_UWB_CAL_GEOMETRY_SETTLE_MS
+#define CAL_GEOMETRY_REQUIRE_COMPLETE CONFIG_UWB_CAL_GEOMETRY_REQUIRE_COMPLETE
 #define CAL_READY_MIN_TIMEOUT_MS      CONFIG_UWB_CAL_READY_MIN_TIMEOUT_MS
 #define CAL_WAIT_MS                   CONFIG_UWB_CAL_WAIT_MS
 #define CAL_DISCOVERY_RESP_BASE_UUS   CONFIG_UWB_CAL_DISCOVERY_RESP_BASE_UUS
@@ -73,6 +74,7 @@ void dw_port_reset_deassert(void);
 #define CAL_GEOMETRY_REPLAY_COUNT     4U
 #define CAL_GEOM_DONE_BROADCASTS      3U
 #define CAL_GEOMETRY_RETRY_BURST      3U
+#define CAL_GEOMETRY_PERSIST_LOG_MS   1000U
 
 #define BEACON_ID      CONFIG_UWB_BEACON_ID
 #define BEACON_SLOT_ID CONFIG_UWB_BEACON_SLOT_ID
@@ -243,6 +245,11 @@ static struct nvs_fs cal_fs;
 static bool cal_store_ready;
 static struct slave_runtime slave_runtime;
 static struct geometry_edge geometry_edges_scratch[MAX_GEOMETRY_EDGES];
+static size_t geometry_edges_scratch_count;
+static uint16_t geometry_valid_edge_count_scratch;
+static uint32_t geometry_roster_hash_scratch;
+static uint8_t geometry_anchor_count_scratch;
+static uint8_t geometry_status_code_scratch;
 
 static inline uint64_t ts5_to_u64(const uint8_t ts[5])
 {
@@ -2496,6 +2503,27 @@ static void master_replay_geometry_edges(const struct geometry_edge *edges, size
     }
 }
 
+static void master_rebroadcast_geometry_session(uint16_t *cal_seq)
+{
+    if (geometry_edges_scratch_count == 0U || geometry_anchor_count_scratch < 2U) {
+        return;
+    }
+
+    printk("CAL: rebroadcasting geometry graph edges=%u valid=%u anchors=%u status=%u\n",
+           (unsigned int)geometry_edges_scratch_count,
+           (unsigned int)geometry_valid_edge_count_scratch,
+           (unsigned int)geometry_anchor_count_scratch,
+           (unsigned int)geometry_status_code_scratch);
+
+    master_replay_geometry_edges(geometry_edges_scratch, geometry_edges_scratch_count,
+                                 geometry_roster_hash_scratch, cal_seq);
+    master_broadcast_geom_done(geometry_status_code_scratch,
+                               geometry_roster_hash_scratch,
+                               geometry_valid_edge_count_scratch,
+                               geometry_anchor_count_scratch,
+                               cal_seq);
+}
+
 static bool master_geometry_pair_with_master(uint8_t responder_id, uint8_t sample_idx,
                                              uint32_t roster_hash,
                                              uint16_t *cal_seq,
@@ -2550,6 +2578,11 @@ static void master_collect_geometry_graph(struct discovered_slave *slaves, size_
     int64_t settle_deadline = k_uptime_get() + (int64_t)CAL_GEOMETRY_SETTLE_MS;
 
     memset(edges, 0, sizeof(geometry_edges_scratch));
+    geometry_edges_scratch_count = 0U;
+    geometry_valid_edge_count_scratch = 0U;
+    geometry_roster_hash_scratch = roster_hash;
+    geometry_anchor_count_scratch = (uint8_t)roster_count;
+    geometry_status_code_scratch = UWB_GEOM_STATUS_FAILED;
     roster_ids[0] = BEACON_ID;
     for (size_t i = 0; i < slave_count; ++i) {
         roster_ids[i + 1U] = slaves[i].beacon_id;
@@ -2660,6 +2693,71 @@ static void master_collect_geometry_graph(struct discovered_slave *slaves, size_
         }
     }
 
+    if (CAL_GEOMETRY_REQUIRE_COMPLETE &&
+        geometry_graph_needs_samples(edges, edge_count, roster_ids, roster_count)) {
+        int64_t next_progress_log = k_uptime_get();
+
+        printk("CAL: geometry still incomplete after retry window, continuing until full graph\n");
+
+        while (geometry_graph_needs_samples(edges, edge_count, roster_ids, roster_count)) {
+            bool progress = false;
+            uint8_t a_id;
+            uint8_t b_id;
+            size_t samples = 0U;
+            size_t goal = 0U;
+
+            if (!geometry_select_retry_pair(edges, edge_count, roster_ids, roster_count,
+                                            &a_id, &b_id, &samples, &goal)) {
+                break;
+            }
+
+            if (k_uptime_get() >= next_progress_log) {
+                printk("CAL: geometry persistent retry a=%u b=%u samples=%u goal=%u\n",
+                       a_id,
+                       b_id,
+                       (unsigned int)samples,
+                       (unsigned int)goal);
+                next_progress_log = k_uptime_get() + CAL_GEOMETRY_PERSIST_LOG_MS;
+            }
+
+            for (uint8_t burst = 0U; burst < CAL_GEOMETRY_RETRY_BURST; ++burst) {
+                uint8_t sample_idx;
+                struct uwb_cal_frame report;
+                bool ok;
+
+                samples = geometry_pair_sample_count(edges, edge_count, a_id, b_id);
+                goal = geometry_pair_retry_goal(samples);
+                if (samples >= goal) {
+                    break;
+                }
+
+                sample_idx = (uint8_t)MIN(samples, UINT8_MAX);
+
+                if (a_id == BEACON_ID) {
+                    ok = master_geometry_pair_with_master(b_id, sample_idx, roster_hash,
+                                                          cal_seq, &report);
+                } else {
+                    ok = master_geometry_pair_between_slaves_bidirectional(a_id, b_id, sample_idx,
+                                                                           roster_hash, cal_seq,
+                                                                           &report);
+                }
+
+                if (!ok) {
+                    printk("CAL: pair persistent timeout a=%u b=%u sample=%u seq=%u\n",
+                           a_id, b_id, sample_idx, *cal_seq);
+                    continue;
+                }
+
+                progress |= master_collect_geometry_edge(edges, &edge_count, &report);
+                k_msleep(5);
+            }
+
+            if (!progress) {
+                k_msleep(10);
+            }
+        }
+    }
+
     size_t valid_edges = geometry_count_valid_edges(edges, edge_count);
     uint8_t status_code = geometry_status_from_edges(roster_count, valid_edges);
     if (valid_edges < geometry_expected_edge_count(roster_count)) {
@@ -2670,6 +2768,9 @@ static void master_collect_geometry_graph(struct discovered_slave *slaves, size_
            (unsigned int)valid_edges,
            (unsigned int)geometry_expected_edge_count(roster_count),
            status_code);
+    geometry_edges_scratch_count = edge_count;
+    geometry_valid_edge_count_scratch = (uint16_t)valid_edges;
+    geometry_status_code_scratch = status_code;
     master_replay_geometry_edges(edges, edge_count, roster_hash, cal_seq);
     master_broadcast_geom_done(status_code, roster_hash, (uint16_t)valid_edges,
                                (uint8_t)roster_count, cal_seq);
@@ -3091,6 +3192,7 @@ static void master_run(void)
         (void)master_range_slave(&slaves[i], &cal_seq);
     }
     ready_count = master_wait_for_slaves_ready(slaves, slave_count, &cal_seq, &sync_seq);
+    master_rebroadcast_geometry_session(&cal_seq);
     signal = master_choose_network_signal(slave_count, ready_count);
 
     if (signal == UWB_NETWORK_SIGNAL_READY) {

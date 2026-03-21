@@ -91,7 +91,7 @@ DW3XXX_TICK_HZ = 63_897_600_000.0
 GATING_SIGMA = 3.0
 AUTO_LAYOUT_RMS_GATE_M = getattr(config, "AUTO_LAYOUT_RMS_GATE_M", 0.25)
 AUTO_LAYOUT_MAX_ABS_GATE_M = getattr(config, "AUTO_LAYOUT_MAX_ABS_GATE_M", 0.45)
-AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE = 2
+AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE = getattr(config, "AUTO_LAYOUT_MIN_EDGE_REPORTS", 1)
 
 BASE_PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DEFAULT_CALIB_PATH = os.path.join(BASE_PACKAGE_DIR, "engine", "logs", "calibration.json")
