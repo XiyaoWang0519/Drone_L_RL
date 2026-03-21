@@ -93,6 +93,13 @@ export default function App() {
   }, [refreshState]);
 
   useEffect(() => {
+    const id = window.setInterval(() => {
+      refreshState();
+    }, 2000);
+    return () => window.clearInterval(id);
+  }, [refreshState]);
+
+  useEffect(() => {
     if (!wsDirty) {
       setWsUrl(deriveWsFromHttp(engineHttpUrl));
     }

@@ -32,6 +32,20 @@ _BLINK_RE = re.compile(
     r"DRONE:\s+BLINK\s+id=(?P<beacon>\d+)\s+seq=(?P<seq>\d+)\s+slot=(?P<slot>\d+)\s+"
     r"flags=(?P<flags>\d+)\s+ts=(?P<ts>\d+)\b"
 )
+_CAL_EDGE_RE = re.compile(
+    r"DRONE:\s+CAL_EDGE\s+a=(?P<a>A\d+)\s+b=(?P<b>A\d+)\s+sample=(?P<sample>\d+)\s+"
+    r"dist_m=(?P<dist>[-+]?\d+(?:\.\d+)?)\s+valid=(?P<valid>\d+)\s+"
+    r"path_ticks=(?P<path>-?\d+)\s+seq=(?P<seq>\d+)"
+    r"(?:\s+roster_hash=(?P<roster>\d+))?\b"
+)
+_CAL_GRAPH_RE = re.compile(
+    r"DRONE:\s+CAL_GRAPH\s+status=(?P<status>[A-Za-z_]+)\s+roster_hash=(?P<roster>\d+)\s+"
+    r"edges=(?P<edges>\d+)\s+anchors=(?P<anchors>\d+)\s+seq=(?P<seq>\d+)\b"
+)
+_CAL_READY_RE = re.compile(
+    r"DRONE:\s+CAL_READY\s+state=(?P<state>[A-Za-z_]+)"
+    r"(?:\s+roster_hash=(?P<roster>\d+))?\s+seq=(?P<seq>\d+)\b"
+)
 _IGNORED_PREFIXES = (
     "DRONE: SYNC_ERR",
     "DRONE: EST ",
@@ -40,6 +54,7 @@ _IGNORED_PREFIXES = (
     "DRONE: RX timeout",
     "DRONE: BLINK parse error",
     "DRONE: SYNC parse error",
+    "DRONE: CAL parse error",
     "DRONE: unknown frame type",
     "[console]",
     "[DWM3001CDK]",
@@ -208,6 +223,37 @@ class DroneBlinkEvent:
     rx_ts: Optional[int] = None
 
 
+@dataclass
+class DroneCalEdgeEvent:
+    anchor_a: str
+    anchor_b: str
+    sample_idx: int
+    dist_m: float
+    valid: bool
+    path_ticks: int
+    seq: int
+    roster_hash: Optional[int] = None
+    text: str = ""
+
+
+@dataclass
+class DroneCalGraphEvent:
+    status: str
+    roster_hash: int
+    edge_count: int
+    anchor_count: int
+    seq: int
+    text: str = ""
+
+
+@dataclass
+class DroneCalReadyEvent:
+    state: str
+    seq: int
+    roster_hash: Optional[int] = None
+    text: str = ""
+
+
 def parse_drone_console_line(line: str) -> Optional[Dict[str, Any]]:
     text = (line or "").strip()
     if not text:
@@ -243,6 +289,51 @@ def parse_drone_console_line(line: str) -> Optional[Dict[str, Any]]:
             ),
         }
 
+    cal_edge_match = _CAL_EDGE_RE.search(text)
+    if cal_edge_match:
+        roster_hash = cal_edge_match.group("roster")
+        return {
+            "type": "cal_edge",
+            "event": DroneCalEdgeEvent(
+                anchor_a=str(cal_edge_match.group("a")),
+                anchor_b=str(cal_edge_match.group("b")),
+                sample_idx=int(cal_edge_match.group("sample")),
+                dist_m=float(cal_edge_match.group("dist")),
+                valid=bool(int(cal_edge_match.group("valid"))),
+                path_ticks=int(cal_edge_match.group("path")),
+                seq=int(cal_edge_match.group("seq")),
+                roster_hash=int(roster_hash) if roster_hash is not None else None,
+                text=text,
+            ),
+        }
+
+    cal_graph_match = _CAL_GRAPH_RE.search(text)
+    if cal_graph_match:
+        return {
+            "type": "cal_graph",
+            "event": DroneCalGraphEvent(
+                status=str(cal_graph_match.group("status")).lower(),
+                roster_hash=int(cal_graph_match.group("roster")),
+                edge_count=int(cal_graph_match.group("edges")),
+                anchor_count=int(cal_graph_match.group("anchors")),
+                seq=int(cal_graph_match.group("seq")),
+                text=text,
+            ),
+        }
+
+    cal_ready_match = _CAL_READY_RE.search(text)
+    if cal_ready_match:
+        roster_hash = cal_ready_match.group("roster")
+        return {
+            "type": "cal_ready",
+            "event": DroneCalReadyEvent(
+                state=str(cal_ready_match.group("state")).lower(),
+                seq=int(cal_ready_match.group("seq")),
+                roster_hash=int(roster_hash) if roster_hash is not None else None,
+                text=text,
+            ),
+        }
+
     return {"type": "unknown", "text": text}
 
 
@@ -266,6 +357,9 @@ class DroneSerialEpochAssembler:
     sync_beta: float = 0.0
     sync_locked: bool = False
     pending_blinks: Dict[int, Dict[int, DroneBlinkEvent]] = field(default_factory=dict)
+    pending_geometry_edges: List[Dict[str, Any]] = field(default_factory=list)
+    completed_geometry_sessions: List[Dict[str, Any]] = field(default_factory=list)
+    last_ready_state: Optional[str] = None
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -283,6 +377,10 @@ class DroneSerialEpochAssembler:
             "dropped_epochs": 0,
             "out_of_order_lines": 0,
             "invalid_measurements": 0,
+            "cal_edge_lines": 0,
+            "cal_graph_lines": 0,
+            "cal_ready_lines": 0,
+            "geometry_sessions": 0,
         }
 
     def reset(self) -> None:
@@ -293,6 +391,9 @@ class DroneSerialEpochAssembler:
         self.sync_beta = 0.0
         self.sync_locked = False
         self.pending_blinks = {}
+        self.pending_geometry_edges = []
+        self.completed_geometry_sessions = []
+        self.last_ready_state = None
         self.diagnostics.update(
             {
                 "sync_locked": False,
@@ -302,6 +403,7 @@ class DroneSerialEpochAssembler:
                 "dropped_epochs": 0,
                 "out_of_order_lines": 0,
                 "invalid_measurements": 0,
+                "geometry_sessions": 0,
             }
         )
 
@@ -323,6 +425,7 @@ class DroneSerialEpochAssembler:
             "radio_schedule": dict(self.radio_schedule),
             "sync_alpha": self.sync_alpha,
             "sync_beta": self.sync_beta,
+            "last_ready_state": self.last_ready_state,
         }
 
     def ingest_line(self, line: str, now_s: Optional[float] = None) -> List[Dict[str, Any]]:
@@ -343,7 +446,24 @@ class DroneSerialEpochAssembler:
         if event_type == "blink":
             self.diagnostics["blink_lines"] += 1
             self._ingest_blink(parsed["event"])
+            return []
+        if event_type == "cal_edge":
+            self.diagnostics["cal_edge_lines"] += 1
+            self._ingest_cal_edge(parsed["event"])
+            return []
+        if event_type == "cal_graph":
+            self.diagnostics["cal_graph_lines"] += 1
+            self._ingest_cal_graph(parsed["event"])
+            return []
+        if event_type == "cal_ready":
+            self.diagnostics["cal_ready_lines"] += 1
+            self._ingest_cal_ready(parsed["event"])
         return []
+
+    def drain_geometry_sessions(self) -> List[Dict[str, Any]]:
+        sessions = list(self.completed_geometry_sessions)
+        self.completed_geometry_sessions.clear()
+        return sessions
 
     def _ingest_sync(self, event: DroneSyncEvent, now_s: Optional[float]) -> List[Dict[str, Any]]:
         outputs: List[Dict[str, Any]] = []
@@ -367,6 +487,75 @@ class DroneSerialEpochAssembler:
                     outputs.append(epoch)
         self.last_sync = event
         return outputs
+
+    def _ingest_cal_edge(self, event: DroneCalEdgeEvent) -> None:
+        self.pending_geometry_edges.append(
+            {
+                "a": event.anchor_a,
+                "b": event.anchor_b,
+                "sample_idx": event.sample_idx,
+                "dist_m": event.dist_m,
+                "valid": event.valid,
+                "path_ticks": event.path_ticks,
+                "seq": event.seq,
+                "roster_hash": event.roster_hash,
+            }
+        )
+
+    def _ingest_cal_graph(self, event: DroneCalGraphEvent) -> None:
+        self._complete_geometry_session(
+            roster_hash=event.roster_hash,
+            graph_seq=event.seq,
+            status=event.status,
+            anchor_count=event.anchor_count,
+            edge_count=event.edge_count,
+        )
+
+    def _ingest_cal_ready(self, event: DroneCalReadyEvent) -> None:
+        self.last_ready_state = event.state
+        if self.pending_geometry_edges and event.state in {"ready", "degraded", "localize"}:
+            anchor_ids = {
+                anchor_id
+                for edge in self.pending_geometry_edges
+                for anchor_id in (edge.get("a"), edge.get("b"))
+                if anchor_id
+            }
+            roster_hash = event.roster_hash
+            if roster_hash is None:
+                for edge in reversed(self.pending_geometry_edges):
+                    candidate = edge.get("roster_hash")
+                    if candidate is not None:
+                        roster_hash = int(candidate)
+                        break
+            self._complete_geometry_session(
+                roster_hash=int(roster_hash or 0),
+                graph_seq=event.seq,
+                status=f"inferred_{event.state}",
+                anchor_count=len(anchor_ids),
+            )
+
+    def _complete_geometry_session(
+        self,
+        *,
+        roster_hash: int,
+        graph_seq: int,
+        status: str,
+        anchor_count: int,
+        edge_count: Optional[int] = None,
+    ) -> None:
+        if not self.pending_geometry_edges:
+            return
+        session = {
+            "roster_hash": int(roster_hash),
+            "graph_seq": int(graph_seq),
+            "status": str(status),
+            "edge_count": int(edge_count if edge_count is not None else len(self.pending_geometry_edges)),
+            "anchor_count": int(anchor_count),
+            "edges": list(self.pending_geometry_edges),
+        }
+        self.pending_geometry_edges.clear()
+        self.completed_geometry_sessions.append(session)
+        self.diagnostics["geometry_sessions"] = self.diagnostics.get("geometry_sessions", 0) + 1
 
     def _ingest_blink(self, event: DroneBlinkEvent) -> None:
         if self.last_sync is not None:
@@ -392,9 +581,6 @@ class DroneSerialEpochAssembler:
             expected_master = float(sync_event.t1_master) + float(self._slot_offset_ticks(blink.slot_id))
             expected_drone = self.sync_alpha * expected_master + self.sync_beta
             toa_ticks = float(blink.rx_ts) - expected_drone
-            if toa_ticks < 0.0:
-                self.diagnostics["invalid_measurements"] += 1
-                continue
             measurements.append(
                 {
                     "id": self._anchor_id_for_beacon(blink.beacon_id),

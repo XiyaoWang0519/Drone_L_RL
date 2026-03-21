@@ -5,11 +5,18 @@ import os
 import struct
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
 from TDoA_Engine.engine import config as engine_config
-from TDoA_Engine.engine.autocal import estimate_clock_params, estimate_layout_from_twr
+from TDoA_Engine.engine.autocal import (
+    estimate_clock_params,
+    estimate_clock_params_with_delay,
+    estimate_ds_twr_path_delay,
+    estimate_layout_from_twr,
+    validate_layout_against_authoritative_positions,
+)
 from TDoA_Engine.engine.ingest import (
     DEFAULT_SLOT_START_UUS,
     DEFAULT_SLOT_UUS,
@@ -97,6 +104,90 @@ class TestAutocal(unittest.TestCase):
         self.assertAlmostEqual(clock["drift_ppm"], 0.35, places=2)
         self.assertAlmostEqual(clock["offset_ns"], 25.0, places=1)
 
+    def test_clock_estimation_with_path_delay_correction(self):
+        t_ref = np.linspace(0.0, 0.2, 20)
+        alpha = 1.0 + 0.35e-6
+        beta = 25e-9
+        path_delay = 12e-9
+        measurements = [
+            {"id": "A2", "t_ref": float(tr), "t_anchor": float(alpha * tr + beta + path_delay)}
+            for tr in t_ref
+        ]
+        naive = estimate_clock_params(measurements)["clocks"][0]
+        corrected = estimate_clock_params_with_delay(measurements, {"A2": path_delay})["clocks"][0]
+        self.assertAlmostEqual(naive["offset_ns"], 37.0, places=1)
+        self.assertAlmostEqual(corrected["offset_ns"], 25.0, places=1)
+        self.assertAlmostEqual(corrected["drift_ppm"], 0.35, places=2)
+
+    def test_ds_twr_path_delay_estimation(self):
+        tick_hz = 63_897_600_000.0
+        tof_ticks = (8.0 / C_AIR) * tick_hz
+        master_reply_delay = 150_000.0
+        slave_reply_delay_local = 180_000.0
+        alpha = 1.0 + 0.4e-6
+        beta = 2_000.0
+        poll_tx = 1_000_000.0
+        poll_rx = alpha * (poll_tx + tof_ticks) + beta
+        resp_tx = poll_rx + slave_reply_delay_local
+        resp_tx_true = (resp_tx - beta) / alpha
+        resp_rx = resp_tx_true + tof_ticks
+        final_tx = resp_rx + master_reply_delay
+        final_rx = alpha * (final_tx + tof_ticks) + beta
+        result = estimate_ds_twr_path_delay(
+            [
+                {
+                    "poll_tx": poll_tx,
+                    "poll_rx": poll_rx,
+                    "resp_tx": resp_tx,
+                    "resp_rx": resp_rx,
+                    "final_tx": final_tx,
+                    "final_rx": final_rx,
+                }
+            ],
+            tick_hz=tick_hz,
+        )
+        self.assertEqual(result["quality"]["status"], "ok")
+        self.assertAlmostEqual(result["distance_m"], 8.0, places=3)
+
+    def test_validate_layout_against_authoritative_positions(self):
+        anchors = [
+            {"id": "A1", "pos": {"x": 0.0, "y": 0.0, "z": 2.4}},
+            {"id": "A2", "pos": {"x": 8.0, "y": 0.0, "z": 2.6}},
+            {"id": "A3", "pos": {"x": 8.0, "y": 6.0, "z": 2.2}},
+        ]
+        edges = [
+            {"a": "A1", "b": "A2", "dist_m": math.sqrt((8.0**2) + (0.2**2))},
+            {"a": "A2", "b": "A3", "dist_m": math.sqrt((6.0**2) + (0.4**2))},
+            {"a": "A1", "b": "A3", "dist_m": math.sqrt((8.0**2) + (6.0**2) + (0.2**2))},
+        ]
+        validation = validate_layout_against_authoritative_positions(edges, anchors, warn_threshold_m=0.05)
+        self.assertEqual(validation["quality"]["status"], "ok")
+        self.assertLess(validation["quality"]["rms_m"], 1e-6)
+
+    def test_layout_canonicalization_is_deterministic_in_3d(self):
+        edges = [
+            {"a": "A1", "b": "A2", "dist_m": 2.0},
+            {"a": "A1", "b": "A3", "dist_m": math.sqrt(5.0)},
+            {"a": "A1", "b": "A4", "dist_m": math.sqrt(3.0)},
+            {"a": "A2", "b": "A3", "dist_m": math.sqrt(5.0)},
+            {"a": "A2", "b": "A4", "dist_m": math.sqrt(3.0)},
+            {"a": "A3", "b": "A4", "dist_m": math.sqrt(2.0)},
+        ]
+
+        result = estimate_layout_from_twr(edges, dims=3)
+        anchors = {anchor["id"]: anchor["pos"] for anchor in result["anchors"]}
+
+        self.assertEqual(result["quality"]["status"], "ok")
+        self.assertAlmostEqual(anchors["A1"]["x"], 0.0, places=6)
+        self.assertAlmostEqual(anchors["A1"]["y"], 0.0, places=6)
+        self.assertAlmostEqual(anchors["A1"]["z"], 0.0, places=6)
+        self.assertGreater(anchors["A2"]["x"], 0.0)
+        self.assertAlmostEqual(anchors["A2"]["y"], 0.0, places=6)
+        self.assertAlmostEqual(anchors["A2"]["z"], 0.0, places=6)
+        self.assertGreater(anchors["A3"]["y"], 0.0)
+        self.assertAlmostEqual(anchors["A3"]["z"], 0.0, places=6)
+        self.assertGreaterEqual(anchors["A4"]["z"], 0.0)
+
 
 class TestDroneConsoleParser(unittest.TestCase):
     def test_parse_sync_line(self):
@@ -125,6 +216,33 @@ class TestDroneConsoleParser(unittest.TestCase):
     def test_unknown_line(self):
         parsed = parse_drone_console_line("hello from elsewhere")
         self.assertEqual(parsed["type"], "unknown")
+
+    def test_parse_cal_edge_line(self):
+        parsed = parse_drone_console_line(
+            "DRONE: CAL_EDGE a=A1 b=A3 sample=2 dist_m=1.234 valid=1 path_ticks=567 seq=99 roster_hash=42 ok=7"
+        )
+        self.assertEqual(parsed["type"], "cal_edge")
+        event = parsed["event"]
+        self.assertEqual(event.anchor_a, "A1")
+        self.assertEqual(event.anchor_b, "A3")
+        self.assertEqual(event.sample_idx, 2)
+        self.assertAlmostEqual(event.dist_m, 1.234, places=3)
+        self.assertTrue(event.valid)
+        self.assertEqual(event.path_ticks, 567)
+        self.assertEqual(event.seq, 99)
+        self.assertEqual(event.roster_hash, 42)
+
+    def test_parse_cal_graph_line(self):
+        parsed = parse_drone_console_line(
+            "DRONE: CAL_GRAPH status=ok roster_hash=42 edges=6 anchors=4 seq=100 ok=9"
+        )
+        self.assertEqual(parsed["type"], "cal_graph")
+        event = parsed["event"]
+        self.assertEqual(event.status, "ok")
+        self.assertEqual(event.roster_hash, 42)
+        self.assertEqual(event.edge_count, 6)
+        self.assertEqual(event.anchor_count, 4)
+        self.assertEqual(event.seq, 100)
 
 
 class TestTimestampUnwrapper(unittest.TestCase):
@@ -199,6 +317,32 @@ class TestDroneSerialAssembler(unittest.TestCase):
         self.assertEqual(outputs, [])
         self.assertEqual(self.assembler.snapshot()["partial_epochs"], 1)
 
+    def test_negative_toa_measurements_are_retained(self):
+        sync_seq = 20
+        t1_sync = 6_000_000_000
+        beta = 300
+        next_t1 = t1_sync + self.superframe_ticks
+        next_t2 = next_t1 + beta
+
+        outputs = self.assembler.ingest_line(f"DRONE: SYNC master=1 seq={sync_seq} t1={t1_sync} ts={t1_sync + beta} ok=1")
+        self.assertEqual(outputs, [])
+
+        toa_ticks = {1: -900.0, 2: 100.0, 3: 700.0}
+        for beacon_id, slot_id in ((1, 0), (2, 1), (3, 2)):
+            rx_ts = t1_sync + self._slot_offset(slot_id) + beta + toa_ticks[beacon_id]
+            self.assembler.ingest_line(
+                f"DRONE: BLINK id={beacon_id} seq={sync_seq} slot={slot_id} flags=0 ts={int(rx_ts)} ok=1"
+            )
+
+        outputs = self.assembler.ingest_line(
+            f"DRONE: SYNC master=1 seq={sync_seq + 1} t1={next_t1} ts={next_t2} ok=2"
+        )
+        self.assertEqual(len(outputs), 1)
+        obs = {anchor["id"]: anchor["t_obs_ticks"] for anchor in outputs[0]["anchors"]}
+        self.assertLess(obs["A1"], 0.0)
+        self.assertAlmostEqual(obs["A2"], toa_ticks[2], places=3)
+        self.assertAlmostEqual(obs["A3"], toa_ticks[3], places=3)
+
     def test_out_of_order_sync_is_ignored(self):
         self.assembler.ingest_line("DRONE: SYNC master=1 seq=5 t1=100 ts=120 ok=1")
         outputs = self.assembler.ingest_line("DRONE: SYNC master=1 seq=4 t1=50 ts=70 ok=1")
@@ -253,6 +397,25 @@ class TestDroneSerialAssembler(unittest.TestCase):
         snapshot = self.assembler.snapshot()
         self.assertEqual(snapshot["out_of_order_lines"], 0)
         self.assertEqual(snapshot["last_superframe_seq"], 5)
+
+    def test_geometry_sessions_are_buffered_until_graph_done(self):
+        self.assembler.ingest_line(
+            "DRONE: CAL_EDGE a=A1 b=A2 sample=0 dist_m=2.000 valid=1 path_ticks=100 seq=11 roster_hash=42 ok=1"
+        )
+        self.assembler.ingest_line(
+            "DRONE: CAL_EDGE a=A1 b=A2 sample=1 dist_m=2.010 valid=1 path_ticks=101 seq=12 roster_hash=42 ok=2"
+        )
+
+        self.assertEqual(self.assembler.drain_geometry_sessions(), [])
+
+        self.assembler.ingest_line(
+            "DRONE: CAL_GRAPH status=ok roster_hash=42 edges=6 anchors=4 seq=13 ok=3"
+        )
+        sessions = self.assembler.drain_geometry_sessions()
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["roster_hash"], 42)
+        self.assertEqual(sessions[0]["graph_seq"], 13)
+        self.assertEqual(len(sessions[0]["edges"]), 2)
 
 
 
@@ -324,6 +487,8 @@ class TestComputePose(unittest.TestCase):
         self.prev_clocks = http_api.STATE.clock_params.copy()
         self.prev_dim = http_api.STATE.dim
         self.prev_schedule = dict(http_api.STATE.radio_schedule)
+        self.prev_max_residual_rms_ns = engine_config.MAX_RESIDUAL_RMS_NS
+        self.prev_max_gdop = engine_config.MAX_GDOP
         http_api.STATE.anchors = {
             "A1": np.array([0.0, 0.0, 2.40]),
             "A2": np.array([8.0, 0.0, 2.65]),
@@ -348,6 +513,8 @@ class TestComputePose(unittest.TestCase):
         http_api.STATE.update_radio_schedule(self.prev_schedule)
         http_api.STATE.update_dimension_from_anchors()
         http_api.STATE.set_dim(self.prev_dim)
+        engine_config.MAX_RESIDUAL_RMS_NS = self.prev_max_residual_rms_ns
+        engine_config.MAX_GDOP = self.prev_max_gdop
         http_api.STATE.reset_filter()
 
     def test_compute_pose_with_clock_compensation(self):
@@ -437,6 +604,42 @@ class TestComputePose(unittest.TestCase):
         self.assertAlmostEqual(result["pose"]["y"], tag_pos[1], places=2)
         self.assertAlmostEqual(result["pose"]["z"], 0.0, places=2)
 
+    def test_quality_gate_rejection_does_not_update_filter_state(self):
+        tag_pos = np.array([3.2, 2.6, 1.3], dtype=float)
+        t_tx = 1.0
+        tick_hz = http_api.STATE.tick_hz
+        epoch = {"tag_tx_seq": 1, "t_tx_tag": t_tx, "anchors": [], "clock": {"tick_hz": tick_hz}}
+        for anchor_id, pos in http_api.STATE.anchors.items():
+            dist = np.linalg.norm(tag_pos - pos)
+            t_true = t_tx + dist / C_AIR
+            params = http_api.STATE.clock_params.get(anchor_id, {"offset_ns": 0.0, "drift_ppm": 0.0})
+            offset = params.get("offset_ns", 0.0) * 1e-9
+            drift = params.get("drift_ppm", 0.0) * 1e-6
+            t_anchor = (1.0 + drift) * t_true + offset
+            epoch["anchors"].append(
+                {
+                    "id": anchor_id,
+                    "t_rx_anc": t_anchor * tick_hz,
+                    "q": 0.15 ** 2,
+                    "cir_snr_db": 20.0,
+                    "nlos_score": 0.0,
+                }
+            )
+
+        engine_config.MAX_GDOP = 0.0
+        state_before, cov_before = http_api.STATE.ekf.state()
+        self.assertIsNone(http_api.STATE.last_t)
+
+        result = http_api.compute_pose(epoch)
+
+        state_after, cov_after = http_api.STATE.ekf.state()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "quality_gate_failed")
+        self.assertEqual(result["metric"], "gdop")
+        self.assertIsNone(http_api.STATE.last_t)
+        self.assertTrue(np.allclose(state_before, state_after))
+        self.assertTrue(np.allclose(cov_before, cov_after))
+
     def test_dimension_detection_from_anchor_layout(self):
         http_api.STATE.anchors = {
             "A1": np.array([0.0, 0.0, 0.0]),
@@ -459,23 +662,48 @@ class TestComputePose(unittest.TestCase):
 class TestCalibrationApi(unittest.TestCase):
     def setUp(self):
         self.prev_anchors = http_api.STATE.anchors.copy()
+        self.prev_manual_anchors = http_api.STATE.manual_anchors.copy()
+        self.prev_auto_anchors = http_api.STATE.auto_anchors.copy()
+        self.prev_active_layout_source = http_api.STATE.active_layout_source
+        self.prev_auto_layout_quality = dict(http_api.STATE.auto_layout_quality)
+        self.prev_auto_layout_status = dict(http_api.STATE.auto_layout_status)
+        self.prev_auto_layout_session = dict(http_api.STATE.auto_layout_session)
         self.prev_clocks = http_api.STATE.clock_params.copy()
         self.prev_dim = http_api.STATE.dim
         self.prev_schedule = dict(http_api.STATE.radio_schedule)
+        self.prev_layout_validation = dict(http_api.STATE.layout_validation)
         self.prev_tick_hz = engine_config.TICK_HZ
         self.prev_calibration_file = engine_config.CALIBRATION_FILE
+        self.prev_auto_layout_rms_gate = http_api.AUTO_LAYOUT_RMS_GATE_M
+        self.prev_auto_layout_max_abs_gate = http_api.AUTO_LAYOUT_MAX_ABS_GATE_M
+        self.prev_auto_layout_min_samples = http_api.AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE
         self.prev_save_calibration = http_api.save_calibration
         self.saved_payloads = []
         http_api.save_calibration = lambda payload: self.saved_payloads.append(payload)
+        http_api.STATE.auto_anchors = {}
+        http_api.STATE.auto_layout_quality = {}
+        http_api.STATE.auto_layout_status = {}
+        http_api.STATE.auto_layout_session = {}
+        http_api.STATE.active_layout_source = "manual"
 
     def tearDown(self):
         http_api.STATE.anchors = self.prev_anchors
+        http_api.STATE.manual_anchors = self.prev_manual_anchors
+        http_api.STATE.auto_anchors = self.prev_auto_anchors
+        http_api.STATE.active_layout_source = self.prev_active_layout_source
+        http_api.STATE.auto_layout_quality = self.prev_auto_layout_quality
+        http_api.STATE.auto_layout_status = self.prev_auto_layout_status
+        http_api.STATE.auto_layout_session = self.prev_auto_layout_session
         http_api.STATE.clock_params = self.prev_clocks
         http_api.STATE.set_dim(self.prev_dim)
         http_api.STATE.update_radio_schedule(self.prev_schedule)
+        http_api.STATE.layout_validation = self.prev_layout_validation
         http_api.STATE.reset_filter()
         engine_config.TICK_HZ = self.prev_tick_hz
         engine_config.CALIBRATION_FILE = self.prev_calibration_file
+        http_api.AUTO_LAYOUT_RMS_GATE_M = self.prev_auto_layout_rms_gate
+        http_api.AUTO_LAYOUT_MAX_ABS_GATE_M = self.prev_auto_layout_max_abs_gate
+        http_api.AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE = self.prev_auto_layout_min_samples
         http_api.save_calibration = self.prev_save_calibration
 
     def test_set_anchors_preserves_schedule_when_omitted(self):
@@ -542,6 +770,223 @@ class TestCalibrationApi(unittest.TestCase):
             self.assertEqual(http_api.STATE.radio_schedule["tick_hz"], 123.0)
         finally:
             os.unlink(path)
+
+    def test_set_anchors_validates_twr_edges_against_authoritative_layout(self):
+        payload = {
+            "anchors": [
+                {"id": "A1", "pos": {"x": 0.0, "y": 0.0, "z": 2.4}},
+                {"id": "A2", "pos": {"x": 8.0, "y": 0.0, "z": 2.6}},
+                {"id": "A3", "pos": {"x": 8.0, "y": 6.0, "z": 2.2}},
+            ],
+            "twr_edges": [
+                {"a": "A1", "b": "A2", "dist_m": math.sqrt((8.0**2) + (0.2**2))},
+                {"a": "A2", "b": "A3", "dist_m": math.sqrt((6.0**2) + (0.4**2))},
+                {"a": "A1", "b": "A3", "dist_m": math.sqrt((8.0**2) + (6.0**2) + (0.2**2))},
+            ],
+            "warn_threshold_m": 0.05,
+        }
+
+        result = asyncio.run(http_api.set_anchors(payload))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["layout_validation"]["quality"]["status"], "ok")
+        self.assertEqual(http_api.STATE.layout_validation["quality"]["status"], "ok")
+        self.assertEqual(self.saved_payloads[-1]["layout_validation"]["quality"]["status"], "ok")
+
+    def test_validate_anchor_layout_endpoint_uses_current_anchors(self):
+        http_api.STATE.anchors = {
+            "A1": np.array([0.0, 0.0, 2.4]),
+            "A2": np.array([8.0, 0.0, 2.6]),
+            "A3": np.array([8.0, 6.0, 2.2]),
+        }
+        http_api.STATE.manual_anchors = http_api.STATE.anchors.copy()
+        http_api.STATE.update_dimension_from_anchors()
+        payload = {
+            "twr_edges": [
+                {"a": "A1", "b": "A2", "dist_m": math.sqrt((8.0**2) + (0.2**2))},
+                {"a": "A2", "b": "A3", "dist_m": math.sqrt((6.0**2) + (0.4**2))},
+                {"a": "A1", "b": "A3", "dist_m": math.sqrt((8.0**2) + (6.0**2) + (0.2**2))},
+            ],
+            "warn_threshold_m": 0.05,
+        }
+
+        result = asyncio.run(http_api.validate_anchor_layout(payload))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["layout_validation"]["quality"]["status"], "ok")
+        self.assertEqual(http_api.STATE.layout_validation["quality"]["status"], "ok")
+
+    def test_geometry_session_promotes_auto_layout(self):
+        http_api.STATE.set_manual_anchors(
+            {
+                "A1": np.array([10.0, 10.0, 0.0]),
+                "A2": np.array([12.0, 10.0, 0.0]),
+                "A3": np.array([10.0, 12.0, 0.0]),
+                "A4": np.array([12.0, 12.0, 0.0]),
+            }
+        )
+        session = {
+            "roster_hash": 42,
+            "graph_seq": 7,
+            "status": "ok",
+            "anchor_count": 4,
+            "edges": [
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A3", "dist_m": math.sqrt(5.0), "valid": True},
+                {"a": "A1", "b": "A3", "dist_m": math.sqrt(5.0), "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": math.sqrt(3.0), "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": math.sqrt(3.0), "valid": True},
+                {"a": "A2", "b": "A3", "dist_m": math.sqrt(5.0), "valid": True},
+                {"a": "A2", "b": "A3", "dist_m": math.sqrt(5.0), "valid": True},
+                {"a": "A2", "b": "A4", "dist_m": math.sqrt(3.0), "valid": True},
+                {"a": "A2", "b": "A4", "dist_m": math.sqrt(3.0), "valid": True},
+                {"a": "A3", "b": "A4", "dist_m": math.sqrt(2.0), "valid": True},
+                {"a": "A3", "b": "A4", "dist_m": math.sqrt(2.0), "valid": True},
+            ],
+        }
+
+        http_api._apply_geometry_session(session)
+
+        self.assertEqual(http_api.STATE.active_layout_source, "auto")
+        self.assertEqual(http_api.STATE.auto_layout_quality["status"], "ok")
+        self.assertAlmostEqual(http_api.STATE.anchors["A1"][0], 0.0, places=6)
+        self.assertGreater(http_api.STATE.anchors["A2"][0], 0.0)
+
+    def test_geometry_session_rejects_and_falls_back_to_manual(self):
+        manual = {
+            "A1": np.array([0.0, 0.0, 0.0]),
+            "A2": np.array([2.0, 0.0, 0.0]),
+            "A3": np.array([0.0, 2.0, 0.0]),
+            "A4": np.array([2.0, 2.0, 1.0]),
+        }
+        http_api.STATE.set_manual_anchors(manual)
+        session = {
+            "roster_hash": 77,
+            "graph_seq": 9,
+            "status": "partial",
+            "anchor_count": 4,
+            "edges": [
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A3", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": math.sqrt(9.0), "valid": True},
+            ],
+        }
+
+        http_api._apply_geometry_session(session)
+
+        self.assertEqual(http_api.STATE.active_layout_source, "manual")
+        self.assertEqual(http_api.STATE.auto_layout_status["reason"], "disconnected_graph")
+        self.assertEqual(
+            http_api.STATE.auto_layout_status["missing_edges"],
+            [{"a": "A2", "b": "A3"}, {"a": "A2", "b": "A4"}, {"a": "A3", "b": "A4"}],
+        )
+        self.assertAlmostEqual(http_api.STATE.anchors["A4"][2], 1.0, places=6)
+
+    def test_geometry_session_rejects_with_weak_edge_details(self):
+        http_api.AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE = 2
+        session = {
+            "roster_hash": 88,
+            "graph_seq": 10,
+            "status": "partial",
+            "anchor_count": 4,
+            "edges": [
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A3", "dist_m": 2.5, "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": 3.0, "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": 3.0, "valid": True},
+                {"a": "A2", "b": "A3", "dist_m": 2.2, "valid": True},
+                {"a": "A2", "b": "A3", "dist_m": 2.2, "valid": True},
+                {"a": "A2", "b": "A4", "dist_m": 2.8, "valid": True},
+                {"a": "A2", "b": "A4", "dist_m": 2.8, "valid": True},
+                {"a": "A3", "b": "A4", "dist_m": 1.7, "valid": True},
+                {"a": "A3", "b": "A4", "dist_m": 1.7, "valid": True},
+            ],
+        }
+
+        http_api._apply_geometry_session(session)
+
+        self.assertEqual(http_api.STATE.active_layout_source, "none")
+        self.assertEqual(http_api.STATE.auto_layout_status["reason"], "insufficient_edge_samples")
+        self.assertEqual(
+            http_api.STATE.auto_layout_status["weak_edges"],
+            [{"a": "A1", "b": "A3", "samples": 1, "required_samples": 2}],
+        )
+
+    def test_geometry_session_accepts_single_edge_report_per_pair(self):
+        session = {
+            "roster_hash": 91,
+            "graph_seq": 12,
+            "status": "ok",
+            "anchor_count": 4,
+            "edges": [
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A3", "dist_m": math.sqrt(5.0), "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": math.sqrt(3.0), "valid": True},
+                {"a": "A2", "b": "A3", "dist_m": math.sqrt(5.0), "valid": True},
+                {"a": "A2", "b": "A4", "dist_m": math.sqrt(3.0), "valid": True},
+                {"a": "A3", "b": "A4", "dist_m": math.sqrt(2.0), "valid": True},
+            ],
+        }
+
+        http_api.AUTO_LAYOUT_MIN_SAMPLES_PER_EDGE = 1
+
+        http_api._apply_geometry_session(session)
+
+        self.assertEqual(http_api.STATE.active_layout_source, "auto")
+        self.assertEqual(http_api.STATE.auto_layout_quality["status"], "ok")
+        self.assertEqual(http_api.STATE.auto_layout_quality["edges_used"], 6)
+
+    def test_geometry_session_uses_configurable_quality_gates(self):
+        session = {
+            "roster_hash": 99,
+            "graph_seq": 11,
+            "status": "ok",
+            "anchor_count": 4,
+            "edges": [
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A2", "dist_m": 2.0, "valid": True},
+                {"a": "A1", "b": "A3", "dist_m": 2.2, "valid": True},
+                {"a": "A1", "b": "A3", "dist_m": 2.2, "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": 2.5, "valid": True},
+                {"a": "A1", "b": "A4", "dist_m": 2.5, "valid": True},
+                {"a": "A2", "b": "A3", "dist_m": 2.1, "valid": True},
+                {"a": "A2", "b": "A3", "dist_m": 2.1, "valid": True},
+                {"a": "A2", "b": "A4", "dist_m": 2.4, "valid": True},
+                {"a": "A2", "b": "A4", "dist_m": 2.4, "valid": True},
+                {"a": "A3", "b": "A4", "dist_m": 1.8, "valid": True},
+                {"a": "A3", "b": "A4", "dist_m": 1.8, "valid": True},
+            ],
+        }
+        mocked_layout = {
+            "anchors": [
+                {"id": "A1", "pos": {"x": 0.0, "y": 0.0, "z": 0.0}},
+                {"id": "A2", "pos": {"x": 2.0, "y": 0.0, "z": 0.0}},
+                {"id": "A3", "pos": {"x": 1.1, "y": 1.0, "z": 0.0}},
+                {"id": "A4", "pos": {"x": 0.4, "y": 0.3, "z": 0.8}},
+            ],
+            "quality": {
+                "status": "ok",
+                "rms_m": 0.2166,
+                "max_abs_m": 0.4288,
+                "edges_used": 6,
+                "anchors": ["A1", "A2", "A3", "A4"],
+                "dims": 2,
+            },
+        }
+
+        http_api.AUTO_LAYOUT_RMS_GATE_M = 0.25
+        http_api.AUTO_LAYOUT_MAX_ABS_GATE_M = 0.45
+
+        with mock.patch.object(http_api, "estimate_layout_from_twr", return_value=mocked_layout):
+            http_api._apply_geometry_session(session)
+
+        self.assertEqual(http_api.STATE.active_layout_source, "auto")
+        self.assertEqual(http_api.STATE.auto_layout_quality["status"], "ok")
+        self.assertEqual(http_api.STATE.auto_layout_quality["rms_gate_m"], 0.25)
+        self.assertEqual(http_api.STATE.auto_layout_quality["max_abs_gate_m"], 0.45)
 
 
 if __name__ == "__main__":

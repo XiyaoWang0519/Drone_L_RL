@@ -14,6 +14,20 @@ config UWB_DRONE_IDLE_LOG_PERIOD
     help
       Print a listening message every N idle loops without frames.
 
+config UWB_TX_ANT_DLY
+    int "DW3000 TX antenna delay"
+    default 16385
+    range 0 65535
+    help
+      TX antenna delay written into the DW3000 TX_ANTD register.
+
+config UWB_RX_ANT_DLY
+    int "DW3000 RX antenna delay"
+    default 16385
+    range 0 65535
+    help
+      RX antenna delay written into the DW3000 RX antenna-delay register.
+
 endmenu
 
 source "Kconfig.zephyr"
