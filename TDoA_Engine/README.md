@@ -81,6 +81,42 @@ Vite serves the UI on <http://127.0.0.1:5173>. The UI connects to the engine str
   ]
   ```
 
+## Engine API reference
+
+The FastAPI service (`engine/service/http_api.py`) exposes the endpoints below on
+`http://127.0.0.1:8000` by default. The packet/serial input contracts and the
+configuration environment variables are documented in
+[`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
+
+### REST endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/healthz` | Engine status: active anchors, layout source, clock params, radio schedule, ingest status, logging/replay state, and last solve stats. |
+| `GET` | `/anchors` | Current anchor layout (active/manual/auto), clock calibration, radio schedule, and layout validation. |
+| `POST` | `/set_anchors` | Update the manual anchor layout (and optionally `anchor_clocks`, `radio_schedule`, `twr_edges`). Persists to `calibration.json`. Body: `{ "anchors": [{ "id": "A1", "pos": {"x":..,"y":..,"z":..} }, ...], "anchor_clocks": [...] }`. |
+| `POST` | `/validate_anchor_layout` | Compare supplied `twr_edges` against the authoritative anchor positions; returns a validation report. |
+| `POST` | `/start_log` | Begin raw + pose logging under `engine/logs/`. Optional body `{ "label": "walk" }`. Returns the log filenames. |
+| `POST` | `/stop_log` | Close the active log files. |
+| `POST` | `/replay?file=<run>.bin&speed=1.0` | Replay a captured log through the solver/WebSocket at recorded cadence. Pass `file=stop` to cancel an in-flight replay. |
+
+### Anchor clock entries
+
+`anchor_clocks` items take the form:
+
+```json
+{ "id": "A2", "offset_ns": 2.5, "drift_ppm": 0.35, "valid": true }
+```
+
+`offset_ns` is the fixed timing bias and `drift_ppm` the clock-rate error; the
+engine corrects time as `t = (t_raw − offset) / (1 + drift)`.
+
+### WebSocket
+
+- `GET /stream` (WebSocket) — pushes filtered pose updates (~50 Hz). Message
+  shape is documented in
+  [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md#7-pose-output-websocket-stream).
+
 ## Troubleshooting
 
 - If the UI shows "offline", confirm the engine is running and CORS headers allow your origin (default config allows `*`).

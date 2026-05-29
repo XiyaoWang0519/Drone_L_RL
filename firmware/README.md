@@ -7,8 +7,15 @@ Embedded code and board assets for DWM3001CDK (nRF52833 + DW3000 UWB) using Zeph
   - `led_bringup/`: Blink LED via overlay alias `led0`
   - `usb_hello/`: USB CDC-ACM “hello” over serial
   - `uwb_chipid/`: Read DW3000 chip ID, basic SPI bring-up
-  - `twr_initiator/` and `twr_responder/`: Two-way ranging pair (WIP)
+  - `gps_beacon_master/`: Sync-source anchor that broadcasts wireless sync + blinks
+  - `gps_beacon_slave/`: Wireless-synced anchor that blinks in its assigned slot
+  - `gps_beacon_master_verify/` and `gps_beacon_slave_verify/`: Verify-firmware variants that emit machine-parseable `VER` events for the 5-minute verification workflow (see `docs/uwb_verification_workflow.md`)
+  - `gps_beacon/`: Base beacon sample
+  - `drone_rx/`: Drone-side (tag) UWB receiver — timestamps anchor blinks (WIP)
 - `src/`, `include/`, `tests/`: Shared modules and test scaffolding (placeholders)
+
+Anchor identity is set per-app in `prj.conf` via `CONFIG_UWB_BEACON_ID` and
+`CONFIG_UWB_BEACON_SLOT_ID`.
 
 ## Prerequisites
 - Zephyr SDK, Python 3.10+, and `west` available
