@@ -2123,13 +2123,22 @@ static void slave_run_localization(struct slave_runtime *runtime)
             continue;
         }
 
+        /* Capture before clearing: the handlers below must know whether the
+         * failed RX was a predicted window to retry/advance it.
+         */
+        bool was_window_active = rx_window_active;
+
+#if !SLAVE_RX_WINDOWED
+        ARG_UNUSED(was_window_active);
+#endif
+
         rx_active = false;
         rx_window_active = false;
         dwt_forcetrxoff();
 
         if (result == RX_WAIT_ERROR) {
 #if SLAVE_RX_WINDOWED
-            if (rx_window_active && runtime->sync.valid) {
+            if (was_window_active && runtime->sync.valid) {
                 uint32_t decode_error_mask =
                     DWT_INT_RXPHE_BIT_MASK |
                     DWT_INT_RXFCE_BIT_MASK |
@@ -2166,7 +2175,7 @@ static void slave_run_localization(struct slave_runtime *runtime)
 
         if (result == RX_WAIT_TIMEOUT) {
 #if SLAVE_RX_WINDOWED
-            if (rx_window_active && runtime->sync.valid) {
+            if (was_window_active && runtime->sync.valid) {
                 next_sync_slave_ticks += superframe_ticks;
                 rx_window_miss_streak++;
                 rx_window_ready = rx_window_miss_streak <= SLAVE_RX_WINDOW_PERSIST_MISSES;
