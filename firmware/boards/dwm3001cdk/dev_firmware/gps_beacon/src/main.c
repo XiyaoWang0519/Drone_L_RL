@@ -47,6 +47,7 @@ void dw_port_reset_deassert(void);
 #define SLAVE_RX_WINDOW_LATE_MARGIN_UUS 2000U
 
 #define CAL_DISCOVERY_ROUNDS          CONFIG_UWB_CAL_DISCOVERY_ROUNDS
+#define CAL_DISCOVERY_TIMEOUT_MS      CONFIG_UWB_CAL_DISCOVERY_TIMEOUT_MS
 #define CAL_EXPECTED_SLAVES           CONFIG_UWB_CAL_EXPECTED_SLAVES
 #define CAL_TWR_SAMPLES               CONFIG_UWB_CAL_TWR_SAMPLES
 #define CAL_SYNC_SAMPLES              CONFIG_UWB_CAL_SYNC_SAMPLES
@@ -67,7 +68,7 @@ void dw_port_reset_deassert(void);
 #define TX_ANT_DLY                    CONFIG_UWB_TX_ANT_DLY
 #define RX_ANT_DLY                    CONFIG_UWB_RX_ANT_DLY
 #define CAL_CONTROL_TX_DELAY_UUS      4000U
-#define CAL_TWR_MIN_VALID_SAMPLES     2U
+#define CAL_TWR_MIN_VALID_SAMPLES     3U
 #define CAL_TWR_ATTEMPTS              MAX(CAL_TWR_SAMPLES, 8U)
 #define CAL_SYNC_BROADCASTS           MAX(CAL_SYNC_SAMPLES + 2U, 8U)
 #define CAL_READY_SYNC_BURST          MAX(4U, ((CAL_SYNC_SAMPLES + 1U) / 2U))
@@ -465,7 +466,8 @@ static int64_t median_i64(const int64_t *values, size_t count)
 
     memcpy(scratch, values, count * sizeof(scratch[0]));
     sample_sort_i64(scratch, count);
-    return scratch[count / 2U];
+    /* Lower middle on even counts: multipath errors are one-sided (long). */
+    return scratch[(count - 1U) / 2U];
 }
 
 static uint16_t median_u16(const uint16_t *values, size_t count)
@@ -478,7 +480,8 @@ static uint16_t median_u16(const uint16_t *values, size_t count)
 
     memcpy(scratch, values, count * sizeof(scratch[0]));
     sample_sort_u16(scratch, count);
-    return scratch[count / 2U];
+    /* Lower middle on even counts: multipath errors are one-sided (long). */
+    return scratch[(count - 1U) / 2U];
 }
 
 static struct geometry_edge *find_or_add_geometry_edge(struct geometry_edge *edges,
@@ -1201,6 +1204,17 @@ static int dw3110_radio_init(void)
         return -EIO;
     }
 
+    /* Reset-default TX power is far below regulatory limits; a weak first
+     * path biases leading-edge timestamps long. Use Qorvo's reference
+     * channel-9 TX settings.
+     */
+    dwt_txconfig_t txcfg = {
+        .PGdly = 0x34,
+        .power = 0xfefefefe,
+        .PGcount = 0x0,
+    };
+    dwt_configuretxrf(&txcfg);
+
     dwt_setrxantennadelay((uint16_t)RX_ANT_DLY);
     dwt_settxantennadelay((uint16_t)TX_ANT_DLY);
     dwt_configureframefilter(DWT_FF_DISABLE, 0);
@@ -1302,11 +1316,15 @@ static bool wait_for_matching_cal_frame(uint8_t msg_type, uint8_t src_id, uint8_
         enum rx_wait_result result = wait_for_rx_event((uint32_t)MAX(1LL, deadline - k_uptime_get()),
                                                        &status);
         if (result != RX_WAIT_OK) {
+            /* The hardware RX timeout (CAL_RX_TIMEOUT_UUS, ~15 ms) is much
+             * shorter than the protocol budgets; treat it as a cue to re-arm
+             * and keep listening until the software deadline expires.
+             */
             dwt_forcetrxoff();
-            if (result == RX_WAIT_TIMEOUT) {
+            if (k_uptime_get() >= deadline) {
                 return false;
             }
-            if (k_uptime_get() < deadline && !arm_immediate_rx(CAL_RX_TIMEOUT_UUS)) {
+            if (!arm_immediate_rx(CAL_RX_TIMEOUT_UUS)) {
                 return false;
             }
             continue;
@@ -1804,8 +1822,11 @@ static bool handle_slave_twr_poll(struct slave_runtime *runtime, const struct uw
         return false;
     }
 
+    /* Keep the poll->response window free of USB console traffic; the
+     * response is due CAL_POLL_RX_TO_RESP_TX_DLY_UUS after poll RX.
+     */
     runtime->state = UWB_ANCHOR_STATE_TWR_GRAPH;
-    on_state_change(runtime->state);
+    set_led_mode(runtime->state);
 
     uint64_t poll_rx_ts = last_rx_ts;
     uint32_t resp_tx_time = (uint32_t)((poll_rx_ts +
@@ -1881,7 +1902,7 @@ static bool handle_slave_pair_plan(struct slave_runtime *runtime, const struct u
     }
 
     runtime->state = UWB_ANCHOR_STATE_TWR_GRAPH;
-    on_state_change(runtime->state);
+    set_led_mode(runtime->state);
     ok = run_geometry_pair_initiator(BEACON_ID, plan_frame->dst_id, BEACON_SLOT_ID,
                                      plan_frame->seq, plan_frame->slot_id,
                                      (uint32_t)plan_frame->ts_a,
@@ -2020,7 +2041,17 @@ static void slave_run_localization(struct slave_runtime *runtime)
                     uint32_t blink_rx_after_tx_delay_uus = 0U;
                     uint32_t blink_rx_after_tx_timeout_uus = 0U;
                     bool blink_rx_auto_armed = false;
-                    uint32_t blink_target_dtu = (uint32_t)(blink_slave_ticks >> 8);
+                    /* blink_slave_ticks is the desired RMARKER instant, but a
+                     * delayed TX emits the RMARKER at programmed time plus the
+                     * TX antenna delay. Without this correction every slave
+                     * blink leaves TX_ANT_DLY (~256 ns, ~77 m of light travel)
+                     * late relative to the master's slot schedule.
+                     */
+                    uint64_t blink_prog_ticks = blink_slave_ticks;
+                    if (blink_prog_ticks > (uint64_t)TX_ANT_DLY) {
+                        blink_prog_ticks -= (uint64_t)TX_ANT_DLY;
+                    }
+                    uint32_t blink_target_dtu = (uint32_t)(blink_prog_ticks >> 8);
                     uint32_t now = get_sys_time_u32();
                     blink_target_dtu = guard_tx_time(blink_target_dtu, now, tx_guard_dtu,
                                                      slot_offset_dtu);
@@ -2236,9 +2267,13 @@ static void slave_wait_for_network(struct slave_runtime *runtime)
         case UWB_CAL_MSG_DISCOVERY_REQ:
             runtime->master_id = cal.src_id;
             runtime->timing.master_id = cal.src_id;
+            /* The hello must hit its response slot; log only after TX so
+             * console latency cannot shift it into a neighbour's slot.
+             */
             runtime->state = UWB_ANCHOR_STATE_DISCOVERY;
-            on_state_change(runtime->state);
+            set_led_mode(runtime->state);
             send_slave_hello(cal.src_id, cal.seq, &tx_ok, &tx_late, &tx_timeout);
+            on_state_change(runtime->state);
             break;
         case UWB_CAL_MSG_TWR_POLL:
             runtime->master_id = cal.src_id;
@@ -2254,8 +2289,9 @@ static void slave_wait_for_network(struct slave_runtime *runtime)
             } else if (runtime->timing.cached_valid) {
                 runtime->state = UWB_ANCHOR_STATE_DEGRADED;
             }
-            on_state_change(runtime->state);
+            set_led_mode(runtime->state);
             send_slave_status(runtime, cal.src_id, cal.seq, &tx_ok, &tx_late, &tx_timeout);
+            on_state_change(runtime->state);
             break;
         case UWB_CAL_MSG_NETWORK:
             runtime->timing.roster_hash = (uint32_t)cal.ts_a;
@@ -2338,9 +2374,12 @@ static size_t master_discover_slaves(struct discovered_slave *slaves, uint16_t *
     uint32_t tx_ok = 0U;
     uint32_t tx_late = 0U;
     uint32_t tx_timeout = 0U;
+    uint32_t round = 0U;
+    int64_t retry_deadline = k_uptime_get() + (int64_t)CAL_DISCOVERY_TIMEOUT_MS;
+    int64_t next_progress_log = k_uptime_get() + 1000LL;
 
     on_state_change(UWB_ANCHOR_STATE_DISCOVERY);
-    for (uint32_t round = 0; round < CAL_DISCOVERY_ROUNDS; ++round) {
+    while (1) {
         uint16_t seq = ++(*cal_seq);
         struct uwb_cal_frame req = {
             .frame_type = UWB_FRAME_TYPE_CAL,
@@ -2356,14 +2395,28 @@ static size_t master_discover_slaves(struct discovered_slave *slaves, uint16_t *
             .ts_c = 0U,
         };
 
-        if (!send_cal_frame_after_uus(&req, CAL_CONTROL_TX_DELAY_UUS, "CAL_DISC", &tx_ok, &tx_late,
-                                      &tx_timeout, DWT_START_TX_DELAYED, 0U, 0U)) {
-            continue;
+        if (send_cal_frame_after_uus(&req, CAL_CONTROL_TX_DELAY_UUS, "CAL_DISC", &tx_ok, &tx_late,
+                                     &tx_timeout, DWT_START_TX_DELAYED, 0U, 0U)) {
+            collect_hello_responses(slaves, &count, seq);
         }
 
-        collect_hello_responses(slaves, &count, seq);
+        round++;
         if (CAL_EXPECTED_SLAVES > 0U && count >= CAL_EXPECTED_SLAVES) {
             break;
+        }
+        /* Always run the minimum rounds; if slaves are still missing, keep
+         * retrying within the timeout window so boot order does not decide
+         * whether the roster is complete.
+         */
+        if (round >= CAL_DISCOVERY_ROUNDS &&
+            (CAL_EXPECTED_SLAVES == 0U || k_uptime_get() >= retry_deadline)) {
+            break;
+        }
+        if (k_uptime_get() >= next_progress_log) {
+            printk("CAL: discovery retry round=%u found=%u expected=%u left_ms=%lld\n",
+                   round, (unsigned int)count, (unsigned int)CAL_EXPECTED_SLAVES,
+                   (long long)MAX(0LL, retry_deadline - k_uptime_get()));
+            next_progress_log = k_uptime_get() + 1000LL;
         }
         k_msleep(10);
     }
