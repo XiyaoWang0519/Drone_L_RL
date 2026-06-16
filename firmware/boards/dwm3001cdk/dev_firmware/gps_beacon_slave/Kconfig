@@ -149,7 +149,17 @@ config UWB_CAL_DISCOVERY_ROUNDS
     default 3
     range 1 16
     help
-      Number of broadcast discovery requests sent by the master.
+      Minimum number of broadcast discovery requests sent by the master.
+
+config UWB_CAL_DISCOVERY_TIMEOUT_MS
+    int "Discovery retry window when slaves are missing (ms)"
+    default 20000
+    range 0 120000
+    help
+      After the minimum discovery rounds, keep broadcasting discovery
+      requests for up to this long while fewer than the expected number of
+      slaves have answered. This removes the dependence on anchor power-on
+      order. Set to 0 to disable retries beyond the minimum rounds.
 
 config UWB_CAL_EXPECTED_SLAVES
     int "Expected number of slave anchors"
@@ -161,7 +171,7 @@ config UWB_CAL_EXPECTED_SLAVES
 
 config UWB_CAL_TWR_SAMPLES
     int "DS-TWR samples per master/slave link"
-    default 5
+    default 8
     range 1 16
     help
       Number of ranging exchanges used to estimate the one-way master-slave
@@ -176,7 +186,7 @@ config UWB_CAL_SYNC_SAMPLES
 
 config UWB_CAL_GEOMETRY_TARGET_SAMPLES
     int "Target geometry samples per anchor pair"
-    default 4
+    default 8
     range 2 16
     help
       Preferred number of successful DS-TWR geometry samples gathered per
